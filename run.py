@@ -2,9 +2,8 @@ import argparse
 from argparse import BooleanOptionalAction
 from pathlib import Path
 
-from engine import Engine
 from ocr import OCR_Subtitles
-from utils import OCREngine, OCREngineType, create_ocr_engine, engine_type, float_range, ocr_engine_type
+from utils import OCREngine, OCREngineType, create_ocr_engine, float_range, ocr_engine_type
 from vsf import VideoSubFinder
 
 
@@ -38,14 +37,26 @@ def create_arg_parser() -> argparse.ArgumentParser:
     )
 
     _ = parser.add_argument(
-        "-e",
-        "--engine",
-        type=engine_type,
-        default=Engine.VIDEOSUBFINDER,
-        help=f"Select the processing engine. Choices: {[e.value for e in Engine]}. Default: {Engine.VIDEOSUBFINDER.value}"
+        "-f",
+        "--format",
+        type=str,
+        choices=["ass", "srt", "both"],
+        default="ass",
+        help="Subtitle output format. Choices: ['ass', 'srt', 'both']. Default: ass",
     )
 
+    _ = parser.add_argument(
+        "-l",
+        "--lang",
+        type=str,
+        choices=["vi", "en", "ja", "zh"],
+        default="vi",
+        help="Language preset for OCR engine, text cleanup, font, and subtitle merging. Choices: ['vi', 'en', 'ja', 'zh']. Default: vi",
+    )
+
+
     ocr_group = parser.add_argument_group(title="OCR Engine Settings")
+
     _ = ocr_group.add_argument(
         "--ocr_engine",
         type=ocr_engine_type,
@@ -239,7 +250,14 @@ def create_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def process_vsf(video_list: list[Path], output_dir: str, vsf: VideoSubFinder, ocr_engine: OCREngine):
+def process_vsf(
+    video_list: list[Path],
+    output_dir: str,
+    vsf: VideoSubFinder,
+    ocr_engine: OCREngine,
+    subtitle_format: str = "ass",
+    lang: str = "vi",
+):
 
     print("Extracting subtitle images with VideoSubFinder (takes quite a long time) ...")
     video_num = len(video_list)
@@ -262,7 +280,14 @@ def process_vsf(video_list: list[Path], output_dir: str, vsf: VideoSubFinder, oc
         if vsf.txtimage:
             images_dir = Path(save_vsf_dir) / "TXTImages"
 
-        ocr = OCR_Subtitles(output_subtitles_name=save_name, output_directory=save_dir, images_dir_override=images_dir, ocr_engine=ocr_engine)
+        ocr = OCR_Subtitles(
+            output_subtitles_name=save_name,
+            output_directory=save_dir,
+            images_dir_override=images_dir,
+            ocr_engine=ocr_engine,
+            subtitle_format=subtitle_format,
+            lang=lang,
+        )
         ocr()
 
     return
@@ -272,37 +297,46 @@ def main():
     parser = create_arg_parser()
     args = parser.parse_args()
 
-    engine: Engine = args.engine
     ocr_engine: OCREngine = create_ocr_engine(args.ocr_engine, args)
     output_dir: str = args.output_dir
 
     if args.img_dir:
-        subtitle_name = args.output_subtitles
-        if args.output_subtitles is None:
-            subtitle_name = "output_subtitles"
-        ocr = OCR_Subtitles(subtitle_name, output_dir, args.img_dir, ocr_engine)
+        subtitle_name = args.output_subtitles or "output_subtitles"
+        ocr = OCR_Subtitles(
+            output_subtitles_name=subtitle_name,
+            output_directory=output_dir,
+            images_dir_override=args.img_dir,
+            ocr_engine=ocr_engine,
+            subtitle_format=args.format,
+            lang=args.lang,
+        )
         ocr()
         return
 
-    if engine == Engine.VIDEOSUBFINDER:
+    # Process video with VideoSubFinder
+    video_path = args.video_dir
+    if video_path is None:
+        parser.error("--video_dir (or --img_dir) is required")
 
-        video_formats = [".mp4", ".avi", ".mov", ".mkv"]
+    video_formats = {".mp4", ".avi", ".mov", ".mkv"}
+    vsf = VideoSubFinder(**vars(args))
 
-        vsf = VideoSubFinder(**vars(args))
+    if Path(video_path).is_dir():
+        video_list = [v.absolute() for v in Path(video_path).rglob("*.*") if v.suffix.lower() in video_formats]
+    else:
+        video_list = [Path(video_path)]
 
-        video_path = args.video_dir
-        if video_path is None:
-            parser.error("--video-dir is required when using VideoSubFinder engine")
-
-        if Path(video_path).is_dir():
-            video_list = Path(video_path).rglob("*.*")
-            video_list = [v.absolute() for v in video_list if v.suffix.lower() in video_formats]
-        else:
-            video_list = [Path(video_path)]
-
-        process_vsf(video_list, output_dir, vsf, ocr_engine=ocr_engine)
-
+    process_vsf(
+        video_list,
+        output_dir,
+        vsf,
+        ocr_engine=ocr_engine,
+        subtitle_format=args.format,
+        lang=args.lang,
+    )
     print("Done")
+
+
 
 
 if __name__ == "__main__":

@@ -1,61 +1,125 @@
-import warnings
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
+import warnings
 
-from ass import AssSubtitle
+from ass import AssSubtitle, get_ass_header
 from engine import OCREngine
-from utils import text_cleanup, timecode_key
+from languages import get_language_config
+from srt import SrtSubtitle
+from utils import parse_filename_timecodes, text_cleanup, timecode_key
 
 
-def _parse_time_ms(ts: str) -> int:
-    try:
-        ts = ts.replace(",", ".")
-        h, m, rest = ts.split(":")
-        s, frac = rest.split(".")
-        if len(frac) > 3:
-            ms_val = round(float(f"0.{frac}") * 1000)
+@dataclass
+class SubtitleItem:
+    start_ms: int
+    end_ms: int
+    text_content: str
+    is_top: bool = False
+
+
+def should_merge_subtitles(
+    prev_text: str, curr_text: str, gap_ms: int, lang: str = "vi"
+) -> tuple[bool, str]:
+    """
+    Determines if two consecutive subtitle entries should be merged into one.
+    Handles identical matches, substring overlaps, and fuzzy similarity based on language preset.
+    Returns (should_merge, best_text).
+    """
+    if gap_ms > 1000:
+        return False, ""
+
+    p = prev_text.strip()
+    c = curr_text.strip()
+    if not p or not c:
+        return False, ""
+
+    # Exact match (case-insensitive)
+    if p.lower() == c.lower():
+        best = c if len(c) > len(p) else p
+        return True, best
+
+    # Normalize line breaks for comparison
+    p_norm = p.replace(r"\N", " ").replace(r"\n", " ")
+    c_norm = c.replace(r"\N", " ").replace(r"\n", " ")
+    p_lower = p_norm.lower()
+    c_lower = c_norm.lower()
+
+    if p_lower == c_lower:
+        best = c if len(c) >= len(p) else p
+        return True, best
+
+    cfg = get_language_config(lang)
+    max_len_diff = 2 if cfg.cjk_mode else 3
+
+    # Substring match with small length difference
+    len_diff = abs(len(p_lower) - len(c_lower))
+    if (p_lower in c_lower or c_lower in p_lower) and len_diff <= max_len_diff:
+        best = c if len(c) >= len(p) else p
+        return True, best
+
+    # Fuzzy similarity using difflib
+    ratio = SequenceMatcher(None, p_lower, c_lower).ratio()
+    min_len = min(len(p_lower), len(c_lower))
+    threshold = cfg.fuzzy_threshold_short if min_len < 10 else cfg.fuzzy_threshold_long
+
+    if ratio >= threshold:
+        has_p_punct = p[-1] in ".!?…\"'。！？"
+        has_c_punct = c[-1] in ".!?…\"'。！？"
+        if has_c_punct and not has_p_punct:
+            best = c
+        elif has_p_punct and not has_c_punct:
+            best = p
+        elif len(c) >= len(p):
+            best = c
         else:
-            ms_val = int(frac.ljust(3, "0"))
-        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + ms_val
-    except Exception:
-        return 0
+            best = p
+        return True, best
+
+    return False, ""
 
 
 class OCR_Subtitles:
     def __init__(
-        self, 
-        output_subtitles_name: str | Path, 
-        output_directory: str | Path, 
+        self,
+        output_subtitles_name: str | Path,
+        output_directory: str | Path,
         images_dir_override: str | Path,
         ocr_engine: OCREngine,
+        subtitle_format: str = "ass",
+        lang: str = "vi",
     ) -> None:
-        self.ass_dict: dict[str, AssSubtitle] = {}
-
+        self.sub_items: dict[str, SubtitleItem] = {}
         self.ocr_engine = ocr_engine
+        self.subtitle_format = subtitle_format.lower()
+        self.lang = lang
+        self.lang_cfg = get_language_config(lang)
 
-        self.images_dir, self.output_file_path = self._process_file(
+        self.images_dir, self.output_files = self._process_file(
             output_subtitles_name, output_directory, images_dir_override
         )
 
     def __call__(self):
         results = self.ocr_engine(self.images_dir)
-        
+
         if not results:
             warnings.warn("No images processed or no text extracted.")
             return
-                
+
         for img_name, text in results.items():
             self._create_subtitle(img_name, text)
-        
-        self._write_ass()
-        
-        print(f"Saved subtitles to {self.output_file_path}")
+
+        self._write_subtitles()
+
+        for fmt, path in self.output_files.items():
+            print(f"Saved {fmt.upper()} subtitle to {path}")
 
     def _process_file(
         self,
         output_subtitles_name: str | Path,
         output_directory: str | Path,
         images_dir_override: str | Path | None = None,
-    ) -> tuple[Path, Path]:
+    ) -> tuple[Path, dict[str, Path]]:
         try:
             output_path = Path(output_directory).resolve()
             if images_dir_override:
@@ -67,13 +131,30 @@ class OCR_Subtitles:
             output_path.mkdir(parents=True, exist_ok=True)
 
             counter = 0
-            output_file_path: Path = output_path / f"{output_subtitles_name}.ass"
-            while output_file_path.exists():
-                counter += 1
-                output_file_path = output_path / f"{output_subtitles_name}_{counter}.ass"
+            while True:
+                suffix = f"_{counter}" if counter > 0 else ""
+                test_ass = output_path / f"{output_subtitles_name}{suffix}.ass"
+                test_srt = output_path / f"{output_subtitles_name}{suffix}.srt"
 
-            return (images_dir_path, output_file_path)
-        except (FileNotFoundError, ValueError, ImportError, IOError, Exception) as e:
+                conflict = False
+                if self.subtitle_format in ("ass", "both") and test_ass.exists():
+                    conflict = True
+                if self.subtitle_format in ("srt", "both") and test_srt.exists():
+                    conflict = True
+
+                if conflict:
+                    counter += 1
+                else:
+                    break
+
+            output_files: dict[str, Path] = {}
+            if self.subtitle_format in ("ass", "both"):
+                output_files["ass"] = output_path / f"{output_subtitles_name}{suffix}.ass"
+            if self.subtitle_format in ("srt", "both"):
+                output_files["srt"] = output_path / f"{output_subtitles_name}{suffix}.srt"
+
+            return (images_dir_path, output_files)
+        except Exception as e:
             print(f"Error type: {type(e).__name__}")
             print(f"Error details: {e}")
             raise
@@ -81,92 +162,89 @@ class OCR_Subtitles:
     def _create_subtitle(self, img_name: str, text: str):
         if text is None:
             text = ""
-        
-        text = text_cleanup(text)
+
+        text = text_cleanup(text, lang=self.lang)
 
         try:
-            img_stem = Path(img_name).stem
-            if img_stem.startswith(("top_", "bot_")):
-                is_top = img_stem.startswith("top_")
-                time_part = img_stem[4:]
-            else:
-                is_top = False
-                time_part = img_stem
-
-            start_part, end_part = time_part.split("__")
-            start_parts = start_part.split("_")
-            end_parts = end_part.split("_")
-
-            start_hour = start_parts[0]
-            start_min = start_parts[1]
-            start_sec = start_parts[2]
-            start_micro = start_parts[3]
-
-            end_hour = end_parts[0]
-            end_min = end_parts[1]
-            end_sec = end_parts[2]
-            end_micro = end_parts[3]
-                
-        except (IndexError, ValueError):
-            print(f"Error processing {img_name}: Filename format is incorrect.")
+            start_ms, end_ms, is_top = parse_filename_timecodes(img_name)
+        except Exception as e:
+            print(f"Error parsing timecodes for {img_name}: {e}")
             return
 
-        start_time = f"{start_hour}:{start_min}:{start_sec},{start_micro}"
-        end_time = f"{end_hour}:{end_min}:{end_sec},{end_micro}"
+        item = SubtitleItem(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            text_content=text,
+            is_top=is_top,
+        )
+        self.sub_items[img_name] = item
 
-        subtitle = AssSubtitle(start_time, end_time, text, is_top)
-        self.ass_dict[img_name] = subtitle
+    def _write_subtitles(self):
+        cleaned_bot: list[SubtitleItem] = []
+        cleaned_top: list[SubtitleItem] = []
+        previous_bot: SubtitleItem | None = None
+        previous_top: SubtitleItem | None = None
 
+        for _, item in sorted(self.sub_items.items(), key=lambda pair: timecode_key(pair[0])):
+            previous_sub = previous_top if item.is_top else previous_bot
+            cleaned_list = cleaned_top if item.is_top else cleaned_bot
 
-    def _write_ass(self):
-        cleaned_ass_bot = []
-        cleaned_ass_top = []
-        previous_subtitle_bot = None
-        previous_subtitle_top = None
-        for _, subtitle in sorted(self.ass_dict.items(), key=timecode_key):
-            previous_subtitle = previous_subtitle_top if subtitle.is_top else previous_subtitle_bot
-            cleaned_ass = cleaned_ass_top if subtitle.is_top else cleaned_ass_bot
-            if not subtitle.text_content or subtitle.text_content.isspace():
+            if not item.text_content or item.text_content.isspace():
                 continue
-            if not previous_subtitle:
-                cleaned_ass.append(subtitle)
-                if subtitle.is_top:
-                    previous_subtitle_top = subtitle
+
+            if not previous_sub:
+                cleaned_list.append(item)
+                if item.is_top:
+                    previous_top = item
                 else:
-                    previous_subtitle_bot = subtitle
+                    previous_bot = item
                 continue
 
-            gap_ms = _parse_time_ms(subtitle.start_time) - _parse_time_ms(previous_subtitle.end_time)
-            if previous_subtitle.text_content.lower() == subtitle.text_content.lower() and gap_ms <= 1000:
-                end_time = (
-                    subtitle.end_time
-                    if _parse_time_ms(subtitle.end_time) >= _parse_time_ms(previous_subtitle.end_time)
-                    else previous_subtitle.end_time
-                )
-                merged_subtitle = AssSubtitle(
-                    start_time=previous_subtitle.start_time,
-                    end_time=end_time,
-                    text_content=previous_subtitle.text_content,
-                    is_top=subtitle.is_top,
-                )
-                cleaned_ass.pop()
-                cleaned_ass.append(merged_subtitle)
-            else:
-                cleaned_ass.append(subtitle)
-
-            if subtitle.is_top:
-                previous_subtitle_top = cleaned_ass[-1]
-            else:
-                previous_subtitle_bot = cleaned_ass[-1]
-        try:
-            all_subtitles = sorted(
-                cleaned_ass_bot + cleaned_ass_top,
-                key=lambda s: _parse_time_ms(s.start_time),
+            gap_ms = item.start_ms - previous_sub.end_ms
+            should_merge, best_text = should_merge_subtitles(
+                previous_sub.text_content, item.text_content, gap_ms, lang=self.lang
             )
-            with self.output_file_path.open("w", encoding="utf-8") as ass_file:
-                _ = ass_file.write(AssSubtitle.ASS_HEADER)
-                for subtitle in all_subtitles:
-                    _ = ass_file.write(str(subtitle))
+
+            if should_merge:
+                merged_end_ms = max(item.end_ms, previous_sub.end_ms)
+                merged_item = SubtitleItem(
+                    start_ms=previous_sub.start_ms,
+                    end_ms=merged_end_ms,
+                    text_content=best_text,
+                    is_top=item.is_top,
+                )
+                cleaned_list.pop()
+                cleaned_list.append(merged_item)
+            else:
+                cleaned_list.append(item)
+
+            if item.is_top:
+                previous_top = cleaned_list[-1]
+            else:
+                previous_bot = cleaned_list[-1]
+
+        all_subtitles = sorted(
+            cleaned_bot + cleaned_top,
+            key=lambda s: s.start_ms,
+        )
+
+        try:
+            # Write ASS format
+            if "ass" in self.output_files:
+                ass_header = get_ass_header(self.lang_cfg.ass_font)
+                with self.output_files["ass"].open("w", encoding="utf-8") as ass_file:
+                    _ = ass_file.write(ass_header)
+                    for item in all_subtitles:
+                        sub = AssSubtitle(item.start_ms, item.end_ms, item.text_content, item.is_top)
+                        _ = ass_file.write(str(sub))
+
+            # Write SRT format (with exact millisecond timestamps from filenames)
+            if "srt" in self.output_files:
+                with self.output_files["srt"].open("w", encoding="utf-8") as srt_file:
+                    for idx, item in enumerate(all_subtitles, 1):
+                        sub = SrtSubtitle(item.start_ms, item.end_ms, item.text_content, item.is_top)
+                        _ = srt_file.write(sub.format(idx))
+
         except IOError as e:
-            print(f"Error writing to output file {self.output_file_path}: {e}")
+            print(f"Error writing subtitle output: {e}")
             raise

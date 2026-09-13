@@ -4,19 +4,6 @@ from pathlib import Path
 from typing import Dict
 
 
-class Engine(Enum):
-    VIDEOSUBFINDER = "videosubfinder"
-
-    def __str__(self):
-        return self.value
-
-    @classmethod
-    def from_string(cls, value: str):
-        for engine in cls:
-            if engine.value.lower() == value.lower():
-                return engine
-        raise ValueError(f"Unknown engine: {value}. Available: {[e.value for e in cls]}")
-
 class OCREngine(ABC):
     """Abstract base class for OCR engines."""
     
@@ -28,6 +15,7 @@ class OCREngine(ABC):
     @abstractmethod
     def engine_name(self) -> str:
         pass
+
 
 class OCREngineType(Enum):
     GGLENS = "gglens"

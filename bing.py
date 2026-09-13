@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from engine import OCREngine
+from languages import get_language_config
 from progress import ImageSecondSpeedColumn
 from utils import collect_images, timecode_key
 
@@ -28,11 +29,15 @@ def _get_bing_session() -> requests.Session:
 
 
 class BingOCR(OCREngine):
-    UPLOAD_URL: str = "https://www.bing.com/images/search?view=detailv2&iss=sbiupload&setlang=vi&mkt=vi-VN"
-
-    def __init__(self, threads: int = 16, line_break_mode: str = "y_cluster"):
+    def __init__(self, threads: int = 16, line_break_mode: str = "y_cluster", lang: str = "vi"):
         self.threads = threads
         self.line_break_mode = line_break_mode
+        self.lang = lang
+        self.lang_cfg = get_language_config(lang)
+        self.upload_url = (
+            f"https://www.bing.com/images/search?view=detailv2&iss=sbiupload"
+            f"&setlang={self.lang_cfg.bing_setlang}&mkt={self.lang_cfg.bing_mkt}"
+        )
         self.scan_lock = Lock()
         self.console = Console()
 
@@ -133,7 +138,7 @@ class BingOCR(OCREngine):
                 mp.addpart(name="imageBin", data=img_b64)
 
                 r1 = session.post(
-                    self.UPLOAD_URL,
+                    self.upload_url,
                     multipart=mp,
                     allow_redirects=False,
                     timeout=20,
@@ -164,11 +169,14 @@ class BingOCR(OCREngine):
             return ""
 
         # Step 2: Request OCR knowledge action
-        api_url = f"https://{api_host}/images/api/custom/knowledge?setlang=vi&mkt=vi-VN"
+        api_url = (
+            f"https://{api_host}/images/api/custom/knowledge"
+            f"?setlang={self.lang_cfg.bing_setlang}&mkt={self.lang_cfg.bing_mkt}"
+        )
         headers = {
             "origin": "https://www.bing.com",
             "referer": f"https://www.bing.com/images/search?view=detailV2&insightstoken={token}",
-            "accept-language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "accept-language": self.lang_cfg.bing_accept_lang,
         }
         req_data = {
             "imageInfo": {"imageInsightsToken": token, "source": "Url"},

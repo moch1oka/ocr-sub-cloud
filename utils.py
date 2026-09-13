@@ -5,91 +5,27 @@ import os
 import platform
 import re
 import shutil
-import unicodedata
 from pathlib import Path
 from typing import Callable, List, Literal
 
 from PIL import Image, UnidentifiedImageError
 
-from engine import Engine, OCREngine, OCREngineType
+from engine import OCREngine, OCREngineType
+from languages import get_language_config
 
 DOUBLE_QUOTE_REGEX = re.compile(
-    "|".join(["«", "‹", "»", "›", "„", "“", "‟", "”", "❝", "❞", "❮", "❯", "〝", "〞", "〟", "＂", "＂"])
+    "|".join(["«", "‹", "»", "›", "„", "“", "‟", "”", "❝", "❞", "❮", "❯", "〝", "〞", "〟", "＂"])
 )
 
-SINGLE_QUOTE_REGEX = re.compile("|".join(["‘", "‛", "’", "❛", "❜", "`", "´", "‘", "’"]))
+SINGLE_QUOTE_REGEX = re.compile("|".join(["‘", "‛", "’", "❛", "❜", "`", "´"]))
 
-
-def text_cleanup(text: str) -> str:
-    # Replace real newlines and literal \n with \N
-    text = text.replace("\r\n", r"\N").replace("\n", r"\N")
-    text = re.sub(r"\\n", r"\\N", text.strip())
-
-    # Các ký tự đặc biệt bạn muốn GIỮ LẠI
-    # Lưu ý: ký tự \ phải được viết là \\ trong chuỗi Python
-    allowed_special_chars = r' ![]_$ /\\:" ,.?-+=()*%@~'
-
-    # Tạo mẫu regex
-    # Mẫu này sẽ tìm tất cả các ký tự KHÔNG PHẢI là:
-    # - Khoảng trắng (\s)
-    # - Ký tự tiếng Việt (a-zA-Z và các dải Unicode cho ký tự có dấu)
-    # - Chữ số (0-9)
-    # - Các ký tự đặc biệt đã cho phép
-    pattern = re.compile(
-        rf"[^\sa-zA-Z"
-        r"\u00C0-\u017F"  # Latin Extended-A
-        r"\u0180-\u024F"  # Latin Extended-B (This is the FIX for ư, ơ)
-        r"\u1E00-\u1EFF"  # Latin Extended Additional (covers most accented letters)
-        r"0-9"
-        rf"{re.escape(allowed_special_chars)}]"
-    )
-
-    # Thực hiện thay thế
-    text = re.sub(pattern, "", text)
-
-    # Collapse multiple \N and trim at ends
-    text = re.sub(r"(?:\s*\\N\s*){2,}", r"\\N", text)
-    text = re.sub(r"^\\N\s*|\s*\\N$", "", text)
-
-    return text
-
-def remove_hieroglyphs_unicode(text: str) -> str:
-    allowed_categories = {
-        "Lu",  # Uppercase letter
-        "Ll",  # Lowercase letter
-        "Lt",  # Titlecase letter
-        "Nd",  # Decimal number
-        "Nl",  # Letter number
-        "No",  # Other number
-        "Pc",  # Connector punctuation
-        "Pd",  # Dash punctuation
-        "Ps",  # Open punctuation
-        "Pe",  # Close punctuation
-        "Pi",  # Initial punctuation
-        "Pf",  # Final punctuation
-        "Po",  # Other punctuation
-        "Sm",  # Math symbol
-        "Sc",  # Currency symbol
-        "Zs",  # Space separator
-    }
-
-    result: list[str] = []
-
-    for char in text:
-        category = unicodedata.category(char)
-
-        if category in allowed_categories:
-            result.append(char)
-
-    cleaned_text = "".join(result).strip()
-
-    # Ensure no more than one consecutive whitespace (extra safety)
-    cleaned_text = re.sub(r"\s{2,}", " ", cleaned_text)
-
-    return cleaned_text
+CJK_CHAR_REGEX = r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
 
 
 def apply_punctuation_and_spacing(text: str) -> str:
+    # Collapse multiple horizontal spaces
+    text = re.sub(r"[ \t]{2,}", " ", text)
+
     # Remove extra spaces before punctuation
     text = re.sub(r"\s+([,.!?…])", r"\1", text)
 
@@ -106,6 +42,75 @@ def fix_quotes(text: str) -> str:
     text = SINGLE_QUOTE_REGEX.sub("'", text)
     text = DOUBLE_QUOTE_REGEX.sub('"', text)
     return text
+
+
+def text_cleanup(text: str, lang: str = "vi") -> str:
+    if text is None:
+        return ""
+
+    cfg = get_language_config(lang)
+
+    # Replace real newlines and literal \n with \N
+    text = text.replace("\r\n", r"\N").replace("\n", r"\N")
+    text = re.sub(r"\\n", r"\\N", text.strip())
+
+    if cfg.cjk_mode:
+        # CJK Mode (Japanese, Chinese)
+        text = SINGLE_QUOTE_REGEX.sub("'", text)
+        text = re.sub(r'[“”]', '"', text)
+
+        # Remove OCR-generated spaces between CJK characters and around CJK punctuation
+        if cfg.strip_cjk_spaces:
+            # Remove space before CJK closing/middle punctuation
+            text = re.sub(r"\s+([、。，！？：；）》」』】…〜])", r"\1", text)
+            # Remove space after CJK opening/middle punctuation
+            text = re.sub(r"([、。，！？：；（《「『【…〜])\s+", r"\1", text)
+            # Remove spaces between CJK characters
+            while re.search(rf"({CJK_CHAR_REGEX})\s+({CJK_CHAR_REGEX})", text):
+                text = re.sub(rf"({CJK_CHAR_REGEX})\s+({CJK_CHAR_REGEX})", r"\1\2", text)
+
+        # Whitelist for CJK text: Kana, Kanji/Hanzi, CJK punctuation, Latin, numbers
+        pattern = re.compile(
+            r"[^\sa-zA-Z0-9"
+            r"\u3000-\u303F"  # CJK symbols & punctuation (、 。 「 」 『 』 etc.)
+            r"\u3040-\u309F"  # Hiragana
+            r"\u30A0-\u30FF"  # Katakana
+            r"\u31F0-\u31FF"  # Katakana Phonetic Extensions
+            r"\u3400-\u4DBF"  # CJK Extension A
+            r"\u4E00-\u9FFF"  # CJK Unified Ideographs
+            r"\uF900-\uFAFF"  # CJK Compatibility
+            r"\uFF00-\uFFEF"  # Halfwidth & Fullwidth Forms
+            r"!\[\]_\$ /\\:\" ,.\?\-+=()*%@~"
+            r"]"
+        )
+        text = re.sub(pattern, "", text)
+
+    else:
+        # Latin / Vietnamese mode
+        text = fix_quotes(text)
+
+        allowed_special_chars = r' ![]_$ /\\:" ,.?-+=()*%@~'
+        pattern = re.compile(
+            rf"[^\sa-zA-Z"
+            r"\u00C0-\u017F"  # Latin Extended-A
+            r"\u0180-\u024F"  # Latin Extended-B (ư, ơ)
+            r"\u1E00-\u1EFF"  # Latin Extended Additional (accented letters)
+            r"0-9"
+            rf"{re.escape(allowed_special_chars)}]"
+        )
+        text = re.sub(pattern, "", text)
+
+        # Normalize punctuation and spacing per line
+        lines = text.split(r"\N")
+        cleaned_lines = [apply_punctuation_and_spacing(l) for l in lines if l.strip()]
+        text = r"\N".join(cleaned_lines)
+
+    # Collapse multiple \N and trim at ends
+    text = re.sub(r"(?:\s*\\N\s*){2,}", r"\\N", text)
+    text = re.sub(r"^\\N\s*|\s*\\N$", "", text)
+
+    return text.strip()
+
 
 
 def get_image_raw_bytes_and_dims(image_path: str) -> tuple[bytes, int, int] | None:
@@ -163,13 +168,8 @@ def float_range(mini: float, maxi: float) -> Callable[..., float]:
     return float_range_checker
 
 
-def engine_type(value_str: str) -> Engine:
-    try:
-        return Engine.from_string(value_str)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
-    
 def ocr_engine_type(value: str) -> OCREngineType:
+
     try:
         return OCREngineType.from_string(value)
     except ValueError as e:
@@ -204,6 +204,36 @@ def collect_images(images_dir: Path) -> List[Path]:
     ]
     return sorted(images)
     
+def parse_filename_timecodes(filename: str | Path) -> tuple[int, int, bool]:
+    """
+    Extracts start_ms, end_ms, and is_top flag directly from VideoSubFinder image filename.
+    Returns (start_ms, end_ms, is_top).
+    Example: '0_00_02_169__0_00_05_004_0000003940856008608560480.jpeg'
+    """
+    name = Path(filename).name
+    name_without_ext = name.rsplit(".", 1)[0]
+    is_top = name_without_ext.startswith("top_")
+
+    if name_without_ext.startswith(("top_", "bot_")):
+        timecode_part = "_".join(name_without_ext.split("_")[1:])
+    else:
+        timecode_part = name_without_ext
+
+    start_raw, end_raw = timecode_part.split("__")
+
+    s_parts = start_raw.split("_")
+    s_h, s_m, s_s, s_frac = int(s_parts[0]), int(s_parts[1]), int(s_parts[2]), s_parts[3]
+    s_ms = int(s_frac) * 10 if len(s_frac) == 2 else int(s_frac.ljust(3, "0")[:3])
+    start_ms = s_h * 3600000 + s_m * 60000 + s_s * 1000 + s_ms
+
+    e_parts = end_raw.split("_")
+    e_h, e_m, e_s, e_frac = int(e_parts[0]), int(e_parts[1]), int(e_parts[2]), e_parts[3]
+    e_ms = int(e_frac) * 10 if len(e_frac) == 2 else int(e_frac.ljust(3, "0")[:3])
+    end_ms = e_h * 3600000 + e_m * 60000 + e_s * 1000 + e_ms
+
+    return start_ms, end_ms, is_top
+
+
 def timecode_key(item):
     if isinstance(item, tuple):
         filename = str(item[0])
@@ -235,15 +265,16 @@ def timecode_key(item):
 
 def create_ocr_engine(ocr_engine_type: OCREngineType, args) -> OCREngine:
     line_break_mode = getattr(args, "line_break_mode", "y_cluster")
+    lang = getattr(args, "lang", "vi")
 
     if ocr_engine_type == OCREngineType.GGLENS:
         from gglens import GoogleLens
-        return GoogleLens(threads=args.gglens_thread, line_break_mode=line_break_mode)
+        return GoogleLens(threads=args.gglens_thread, line_break_mode=line_break_mode, lang=lang)
 
     elif ocr_engine_type == OCREngineType.BING:
         from bing import BingOCR
         threads = getattr(args, "bing_thread", 16)
-        return BingOCR(threads=threads, line_break_mode=line_break_mode)
+        return BingOCR(threads=threads, line_break_mode=line_break_mode, lang=lang)
 
     else:
         raise ValueError(f"Unknown OCR engine: {ocr_engine_type}")

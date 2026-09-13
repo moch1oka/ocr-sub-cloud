@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from engine import OCREngine
+from languages import get_language_config
 from lens import (AppliedFilter, LensOverlayFilterType, LensOverlayRoutingInfo, LensOverlayServerRequest,
                   LensOverlayServerResponse, Platform, Surface,)
 from progress import ImageSecondSpeedColumn
@@ -39,9 +40,11 @@ class GoogleLens(OCREngine):
         "Sec-Fetch-Dest": "empty",
     }
 
-    def __init__(self, threads: int = 16, line_break_mode: str = "y_cluster"):
+    def __init__(self, threads: int = 16, line_break_mode: str = "y_cluster", lang: str = "vi"):
         self.threads = threads
         self.line_break_mode = line_break_mode
+        self.lang = lang
+        self.lang_cfg = get_language_config(lang)
         self.scan_lock = Lock()
         self.console = Console()
     
@@ -110,8 +113,8 @@ class GoogleLens(OCREngine):
         request.objects_request.request_context.client_context.platform = Platform.WEB
         request.objects_request.request_context.client_context.surface = Surface.CHROMIUM
 
-        request.objects_request.request_context.client_context.locale_context.language = "vi"
-        request.objects_request.request_context.client_context.locale_context.region = "VN"
+        request.objects_request.request_context.client_context.locale_context.language = self.lang_cfg.lens_lang
+        request.objects_request.request_context.client_context.locale_context.region = self.lang_cfg.lens_region
         request.objects_request.request_context.client_context.locale_context.time_zone = ""  # not set by chromium
 
         request.objects_request.request_context.client_context.app_id = ""  # not set by chromium
