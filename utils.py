@@ -1,0 +1,249 @@
+import argparse
+import io
+import math
+import os
+import platform
+import re
+import shutil
+import unicodedata
+from pathlib import Path
+from typing import Callable, List, Literal
+
+from PIL import Image, UnidentifiedImageError
+
+from engine import Engine, OCREngine, OCREngineType
+
+DOUBLE_QUOTE_REGEX = re.compile(
+    "|".join(["«", "‹", "»", "›", "„", "“", "‟", "”", "❝", "❞", "❮", "❯", "〝", "〞", "〟", "＂", "＂"])
+)
+
+SINGLE_QUOTE_REGEX = re.compile("|".join(["‘", "‛", "’", "❛", "❜", "`", "´", "‘", "’"]))
+
+
+def text_cleanup(text: str) -> str:
+    # Replace real newlines and literal \n with \N
+    text = text.replace("\r\n", r"\N").replace("\n", r"\N")
+    text = re.sub(r"\\n", r"\\N", text.strip())
+
+    # Các ký tự đặc biệt bạn muốn GIỮ LẠI
+    # Lưu ý: ký tự \ phải được viết là \\ trong chuỗi Python
+    allowed_special_chars = r' ![]_$ /\\:" ,.?-+=()*%@~'
+
+    # Tạo mẫu regex
+    # Mẫu này sẽ tìm tất cả các ký tự KHÔNG PHẢI là:
+    # - Khoảng trắng (\s)
+    # - Ký tự tiếng Việt (a-zA-Z và các dải Unicode cho ký tự có dấu)
+    # - Chữ số (0-9)
+    # - Các ký tự đặc biệt đã cho phép
+    pattern = re.compile(
+        rf"[^\sa-zA-Z"
+        r"\u00C0-\u017F"  # Latin Extended-A
+        r"\u0180-\u024F"  # Latin Extended-B (This is the FIX for ư, ơ)
+        r"\u1E00-\u1EFF"  # Latin Extended Additional (covers most accented letters)
+        r"0-9"
+        rf"{re.escape(allowed_special_chars)}]"
+    )
+
+    # Thực hiện thay thế
+    text = re.sub(pattern, "", text)
+
+    # Collapse multiple \N and trim at ends
+    text = re.sub(r"(?:\s*\\N\s*){2,}", r"\\N", text)
+    text = re.sub(r"^\\N\s*|\s*\\N$", "", text)
+
+    return text
+
+def remove_hieroglyphs_unicode(text: str) -> str:
+    allowed_categories = {
+        "Lu",  # Uppercase letter
+        "Ll",  # Lowercase letter
+        "Lt",  # Titlecase letter
+        "Nd",  # Decimal number
+        "Nl",  # Letter number
+        "No",  # Other number
+        "Pc",  # Connector punctuation
+        "Pd",  # Dash punctuation
+        "Ps",  # Open punctuation
+        "Pe",  # Close punctuation
+        "Pi",  # Initial punctuation
+        "Pf",  # Final punctuation
+        "Po",  # Other punctuation
+        "Sm",  # Math symbol
+        "Sc",  # Currency symbol
+        "Zs",  # Space separator
+    }
+
+    result: list[str] = []
+
+    for char in text:
+        category = unicodedata.category(char)
+
+        if category in allowed_categories:
+            result.append(char)
+
+    cleaned_text = "".join(result).strip()
+
+    # Ensure no more than one consecutive whitespace (extra safety)
+    cleaned_text = re.sub(r"\s{2,}", " ", cleaned_text)
+
+    return cleaned_text
+
+
+def apply_punctuation_and_spacing(text: str) -> str:
+    # Remove extra spaces before punctuation
+    text = re.sub(r"\s+([,.!?…])", r"\1", text)
+
+    # Ensure single space after punctuation, except for multiple punctuation marks
+    text = re.sub(r"([,.!?…])(?!\s)(?![,.!?…])", r"\1 ", text)
+
+    # Remove space between multiple punctuation marks
+    text = re.sub(r"([,.!?…])\s+([,.!?…])", r"\1\2", text)
+
+    return text.strip()
+
+
+def fix_quotes(text: str) -> str:
+    text = SINGLE_QUOTE_REGEX.sub("'", text)
+    text = DOUBLE_QUOTE_REGEX.sub('"', text)
+    return text
+
+
+def get_image_raw_bytes_and_dims(image_path: str) -> tuple[bytes, int, int] | None:
+
+    try:
+        with Image.open(image_path) as img:
+            width = img.width
+            height = img.height
+            max_pixels = 3_000_000
+            if width * height > max_pixels:
+                aspect_ratio = width / height
+                new_w = int(math.sqrt(max_pixels * aspect_ratio))
+                new_h = int(new_w / aspect_ratio)
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                width, height = img.size
+            image_bytes = io.BytesIO()
+            img.save(image_bytes, format="PNG", compress_level=3)
+            return (image_bytes.getvalue(), width, height)
+
+    except FileNotFoundError:
+        print(f"Error: Image file not found at '{image_path}'")
+        return None
+    except UnidentifiedImageError:
+        print(f"Error: Pillow (PIL) cannot identify '{image_path}' as an image. Cannot get dimensions.")
+        return None
+    except IOError as e:
+        print(f"Error reading raw file bytes from '{image_path}': {e}")
+        return None
+    except Exception as e:
+        # Add type hints to help static analysis if possible, but Exception is broad
+        print(f"An unexpected error occurred processing '{image_path}': {e}")
+        return None
+
+
+def float_range(mini: float, maxi: float) -> Callable[..., float]:
+    """Return function handle of an argument type function for
+    ArgumentParser checking a float range: mini <= arg <= maxi
+      mini - minimum acceptable argument
+      maxi - maximum acceptable argument"""
+
+    # Define the function with default arguments
+    def float_range_checker(arg):
+        """New Type function for argparse - a float within predefined range."""
+
+        try:
+            f = float(arg)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a floating point number") from exc
+
+        if f < mini or f > maxi:
+            raise argparse.ArgumentTypeError("must be in range [" + str(mini) + " .. " + str(maxi) + "]")
+        return f
+
+    # Return function handle to checking function
+    return float_range_checker
+
+
+def engine_type(value_str: str) -> Engine:
+    try:
+        return Engine.from_string(value_str)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    
+def ocr_engine_type(value: str) -> OCREngineType:
+    try:
+        return OCREngineType.from_string(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+def get_in_path(name: str) -> str | None:
+    search_name = name
+    if platform.system() == "Windows":
+        search_name = name + ".exe"
+
+    try:
+        path = shutil.which(search_name)
+        # Scoop
+        if platform.system() == "Windows":
+            shim_path = shutil.which(f"{name}.shim")
+            if shim_path:
+                path = str(Path(shim_path).parents[1]) + r"\apps\videosubfinder\current\VideoSubFinderWXW.exe"
+        if path and os.access(path, os.X_OK):
+            return path
+        else:
+            return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+def collect_images(images_dir: Path) -> List[Path]:
+    """Collect all image files from directory."""
+    valid_suffixes = {".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"}
+    images = [
+        p for p in images_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in valid_suffixes
+    ]
+    return sorted(images)
+    
+def timecode_key(item):
+    if isinstance(item, tuple):
+        filename = str(item[0])
+    elif isinstance(item, (Path, str)):
+        filename = str(item)
+    else:
+        filename = str(item)
+    filename = Path(filename).name
+    try:
+        name_without_ext = filename.rsplit('.', 1)[0]
+        
+        if name_without_ext.startswith(('bot_', 'top_')):
+            timecode_part = '_'.join(name_without_ext.split('_')[1:])
+        else:
+            timecode_part = name_without_ext
+        
+        start_timecode = timecode_part.split('__')[0]
+        parts = start_timecode.split('_')
+        
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = int(parts[2])
+        frac = parts[3]
+        ms = int(frac) * 10 if len(frac) == 2 else int(frac)
+        
+        return (hour, minute, second, ms)
+    except (IndexError, ValueError):
+        return (99, 99, 99, 999999)
+
+def create_ocr_engine(ocr_engine_type: OCREngineType, args) -> OCREngine:
+    line_break_mode = getattr(args, "line_break_mode", "y_cluster")
+
+    if ocr_engine_type == OCREngineType.GGLENS:
+        from gglens import GoogleLens
+        return GoogleLens(threads=args.gglens_thread, line_break_mode=line_break_mode)
+
+    elif ocr_engine_type == OCREngineType.BING:
+        from bing import BingOCR
+        threads = getattr(args, "bing_thread", 16)
+        return BingOCR(threads=threads, line_break_mode=line_break_mode)
+
+    else:
+        raise ValueError(f"Unknown OCR engine: {ocr_engine_type}")
