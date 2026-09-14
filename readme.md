@@ -15,7 +15,6 @@ A tool to extract and OCR subtitles from video files or extracted images using *
   - `.srt`: Uses exact 3-digit millisecond timecodes directly from image filenames (`HH:MM:SS,mmm`) with `{\an8}` top-subtitle support.
   - `.ass`: Aegisub-compliant half-up centisecond rounding (`H:MM:SS.cc`) with language-optimized fonts and styles.
   - Output `.ass`, `.srt`, or `both` simultaneously.
-- **Seamless VideoSubFinder Integration**: Automatically detects and loads `settings/general.cfg` located next to `VideoSubFinderWXW.exe`, fully preserving user settings.
 
 ---
 
