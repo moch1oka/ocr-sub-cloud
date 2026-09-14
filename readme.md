@@ -22,7 +22,7 @@ A tool to extract and OCR subtitles from video files or extracted images using *
 ## Setup
 
 ### Step 1: Install Python
-Ensure Python 3.10+ is installed.
+Ensure Python 3.12+ is installed.
 
 ### Step 2: Install Dependencies
 ```bash
@@ -70,6 +70,7 @@ python run.py -vsf "E:\VideoSubFinder_6.10_x64\Release_x64\VideoSubFinderWXW.exe
                         Subtitle output format. Choices: ['ass', 'srt', 'both']. Default: ass
   -l, --lang {vi,en,ja,zh}
                         Language preset for OCR engine, text cleanup, font, and merging. Default: vi
+  --font FONT           Override default font for ASS subtitles (e.g. 'Arial', 'Meiryo', 'Microsoft YaHei').
   --gglens_thread GGLENS_THREAD
                         Google Lens OCR threads. Default: 16
   --bing_thread BING_THREAD

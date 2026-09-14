@@ -13,6 +13,16 @@ def format_srt_timestamp(total_ms: int) -> str:
     return f"{out_h:02d}:{out_m:02d}:{out_s:02d},{out_ms:03d}"
 
 
+def format_srt_block(start_ms: int, end_ms: int, text_content: str, index: int, is_top: bool = False) -> str:
+    """Formats an SRT subtitle block with index, timestamps, and text."""
+    start_ts = format_srt_timestamp(start_ms)
+    end_ts = format_srt_timestamp(end_ms)
+    text = text_content.replace(r"\N", "\n").replace(r"\n", "\n").strip()
+    if is_top:
+        text = f"{{\\an8}}{text}"
+    return f"{index}\n{start_ts} --> {end_ts}\n{text}\n\n"
+
+
 class SrtSubtitle:
     """Represents a single SubRip (SRT) subtitle entry with millisecond precision."""
 

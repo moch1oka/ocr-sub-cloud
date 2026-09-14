@@ -3,10 +3,10 @@ from difflib import SequenceMatcher
 from pathlib import Path
 import warnings
 
-from ass import AssSubtitle, get_ass_header
+from ass import format_ass_dialogue, get_ass_header
 from engine import OCREngine
 from languages import get_language_config
-from srt import SrtSubtitle
+from srt import format_srt_block
 from utils import parse_filename_timecodes, text_cleanup, timecode_key
 
 
@@ -16,6 +16,12 @@ class SubtitleItem:
     end_ms: int
     text_content: str
     is_top: bool = False
+
+    def to_ass(self) -> str:
+        return format_ass_dialogue(self.start_ms, self.end_ms, self.text_content, self.is_top)
+
+    def to_srt(self, index: int) -> str:
+        return format_srt_block(self.start_ms, self.end_ms, self.text_content, index, self.is_top)
 
 
 def should_merge_subtitles(
@@ -88,12 +94,14 @@ class OCR_Subtitles:
         ocr_engine: OCREngine,
         subtitle_format: str = "ass",
         lang: str = "vi",
+        font: str | None = None,
     ) -> None:
         self.sub_items: dict[str, SubtitleItem] = {}
         self.ocr_engine = ocr_engine
         self.subtitle_format = subtitle_format.lower()
         self.lang = lang
         self.lang_cfg = get_language_config(lang)
+        self.font = font or self.lang_cfg.ass_font
 
         self.images_dir, self.output_files = self._process_file(
             output_subtitles_name, output_directory, images_dir_override
@@ -130,11 +138,14 @@ class OCR_Subtitles:
             images_dir_path.mkdir(parents=True, exist_ok=True)
             output_path.mkdir(parents=True, exist_ok=True)
 
+            # Sanitize output name to prevent extension doubling like name.ass.ass
+            clean_name = Path(output_subtitles_name).stem
+
             counter = 0
             while True:
                 suffix = f"_{counter}" if counter > 0 else ""
-                test_ass = output_path / f"{output_subtitles_name}{suffix}.ass"
-                test_srt = output_path / f"{output_subtitles_name}{suffix}.srt"
+                test_ass = output_path / f"{clean_name}{suffix}.ass"
+                test_srt = output_path / f"{clean_name}{suffix}.srt"
 
                 conflict = False
                 if self.subtitle_format in ("ass", "both") and test_ass.exists():
@@ -149,9 +160,9 @@ class OCR_Subtitles:
 
             output_files: dict[str, Path] = {}
             if self.subtitle_format in ("ass", "both"):
-                output_files["ass"] = output_path / f"{output_subtitles_name}{suffix}.ass"
+                output_files["ass"] = output_path / f"{clean_name}{suffix}.ass"
             if self.subtitle_format in ("srt", "both"):
-                output_files["srt"] = output_path / f"{output_subtitles_name}{suffix}.srt"
+                output_files["srt"] = output_path / f"{clean_name}{suffix}.srt"
 
             return (images_dir_path, output_files)
         except Exception as e:
@@ -231,20 +242,22 @@ class OCR_Subtitles:
         try:
             # Write ASS format
             if "ass" in self.output_files:
-                ass_header = get_ass_header(self.lang_cfg.ass_font)
+                ass_header = get_ass_header(self.font)
                 with self.output_files["ass"].open("w", encoding="utf-8") as ass_file:
                     _ = ass_file.write(ass_header)
                     for item in all_subtitles:
-                        sub = AssSubtitle(item.start_ms, item.end_ms, item.text_content, item.is_top)
-                        _ = ass_file.write(str(sub))
+                        _ = ass_file.write(item.to_ass())
 
             # Write SRT format (with exact millisecond timestamps from filenames)
             if "srt" in self.output_files:
                 with self.output_files["srt"].open("w", encoding="utf-8") as srt_file:
                     for idx, item in enumerate(all_subtitles, 1):
-                        sub = SrtSubtitle(item.start_ms, item.end_ms, item.text_content, item.is_top)
-                        _ = srt_file.write(sub.format(idx))
+                        _ = srt_file.write(item.to_srt(idx))
 
         except IOError as e:
             print(f"Error writing subtitle output: {e}")
             raise
+
+
+# Alias for PEP 8 naming compliance
+OCRSubtitles = OCR_Subtitles

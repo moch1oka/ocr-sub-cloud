@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import io
 import math
@@ -6,11 +8,13 @@ import platform
 import re
 import shutil
 from pathlib import Path
-from typing import Callable, List, Literal
+from typing import TYPE_CHECKING, Callable, List
 
 from PIL import Image, UnidentifiedImageError
 
-from engine import OCREngine, OCREngineType
+if TYPE_CHECKING:
+    from engine import OCREngine, OCREngineType
+
 from languages import get_language_config
 
 DOUBLE_QUOTE_REGEX = re.compile(
@@ -29,8 +33,8 @@ def apply_punctuation_and_spacing(text: str) -> str:
     # Remove extra spaces before punctuation
     text = re.sub(r"\s+([,.!?…])", r"\1", text)
 
-    # Ensure single space after punctuation, except for multiple punctuation marks
-    text = re.sub(r"([,.!?…])(?!\s)(?![,.!?…])", r"\1 ", text)
+    # Ensure single space after punctuation, except for multiple punctuation marks and numbers/decimals
+    text = re.sub(r"([,.!?…])(?!\s)(?![,.!?…])(?!\d)", r"\1 ", text)
 
     # Remove space between multiple punctuation marks
     text = re.sub(r"([,.!?…])\s+([,.!?…])", r"\1\2", text)
@@ -80,7 +84,7 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
             r"\u4E00-\u9FFF"  # CJK Unified Ideographs
             r"\uF900-\uFAFF"  # CJK Compatibility
             r"\uFF00-\uFFEF"  # Halfwidth & Fullwidth Forms
-            r"!\[\]_\$ /\\:\" ,.\?\-+=()*%@~"
+            r"!\[\]_\$ /\\:\'\" ,.\?;\-+=()*%@~…"
             r"]"
         )
         text = re.sub(pattern, "", text)
@@ -89,7 +93,8 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
         # Latin / Vietnamese mode
         text = fix_quotes(text)
 
-        allowed_special_chars = r' ![]_$ /\\:" ,.?-+=()*%@~'
+        # Preserve apostrophes/single quotes, semicolons, ellipses, and common punctuation
+        allowed_special_chars = r' ![]_$ /\\:\'" ,.?;\-+=()*%@~…'
         pattern = re.compile(
             rf"[^\sa-zA-Z"
             r"\u00C0-\u017F"  # Latin Extended-A
@@ -127,7 +132,7 @@ def get_image_raw_bytes_and_dims(image_path: str) -> tuple[bytes, int, int] | No
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 width, height = img.size
             image_bytes = io.BytesIO()
-            img.save(image_bytes, format="PNG", compress_level=3)
+            img.save(image_bytes, format="PNG", compress_level=1)
             return (image_bytes.getvalue(), width, height)
 
     except FileNotFoundError:
@@ -168,7 +173,8 @@ def float_range(mini: float, maxi: float) -> Callable[..., float]:
     return float_range_checker
 
 
-def ocr_engine_type(value: str) -> OCREngineType:
+def ocr_engine_type(value: str):
+    from engine import OCREngineType
 
     try:
         return OCREngineType.from_string(value)
@@ -186,7 +192,9 @@ def get_in_path(name: str) -> str | None:
         if platform.system() == "Windows":
             shim_path = shutil.which(f"{name}.shim")
             if shim_path:
-                path = str(Path(shim_path).parents[1]) + r"\apps\videosubfinder\current\VideoSubFinderWXW.exe"
+                scoop_app_path = Path(shim_path).parents[1] / "apps" / "videosubfinder" / "current" / "VideoSubFinderWXW.exe"
+                if scoop_app_path.is_file():
+                    path = str(scoop_app_path)
         if path and os.access(path, os.X_OK):
             return path
         else:
@@ -195,8 +203,9 @@ def get_in_path(name: str) -> str | None:
         print(f"An error occurred: {e}")
         return None
 
-def collect_images(images_dir: Path) -> List[Path]:
+def collect_images(images_dir: Path | str) -> List[Path]:
     """Collect all image files from directory."""
+    images_dir = Path(images_dir)
     valid_suffixes = {".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"}
     images = [
         p for p in images_dir.rglob("*")
@@ -264,6 +273,7 @@ def timecode_key(item):
         return (99, 99, 99, 999999)
 
 def create_ocr_engine(ocr_engine_type: OCREngineType, args) -> OCREngine:
+    from engine import OCREngineType
     line_break_mode = getattr(args, "line_break_mode", "y_cluster")
     lang = getattr(args, "lang", "vi")
 

@@ -1,23 +1,14 @@
 import base64
-import concurrent.futures
 import io
 import json
 import threading
 import time
-from pathlib import Path
-from threading import Lock
-from typing import Any, Dict
 from urllib.parse import parse_qs, urlparse
 
 from curl_cffi import requests
 from PIL import Image
-from rich.console import Console
-from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
-from engine import OCREngine
-from languages import get_language_config
-from progress import ImageSecondSpeedColumn
-from utils import collect_images, timecode_key
+from engine import OCREngine, cluster_lines_by_y
 
 _local_session = threading.local()
 
@@ -30,67 +21,19 @@ def _get_bing_session() -> requests.Session:
 
 class BingOCR(OCREngine):
     def __init__(self, threads: int = 16, line_break_mode: str = "y_cluster", lang: str = "vi"):
-        self.threads = threads
-        self.line_break_mode = line_break_mode
-        self.lang = lang
-        self.lang_cfg = get_language_config(lang)
+        super().__init__(threads=threads, line_break_mode=line_break_mode, lang=lang)
         self.upload_url = (
             f"https://www.bing.com/images/search?view=detailv2&iss=sbiupload"
             f"&setlang={self.lang_cfg.bing_setlang}&mkt={self.lang_cfg.bing_mkt}"
         )
-        self.scan_lock = Lock()
-        self.console = Console()
 
     @property
     def engine_name(self) -> str:
         return "Bing OCR"
 
-    def __call__(self, images_dir: Path) -> Dict[str, str]:
-        """Process all images in a directory with multithreading."""
-        images = collect_images(images_dir)
-
-        if not images:
-            self.console.print(f"[yellow]No images found in {images_dir}[/yellow]")
-            return {}
-
-        results: Dict[str, str] = {}
-
-        with Progress(
-            TextColumn(f"[progress.description]{{task.description}} ({self.engine_name})"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            TextColumn("{task.percentage:>3.0f}%"),
-            ImageSecondSpeedColumn(),
-            TimeRemainingColumn(),
-            console=self.console,
-        ) as progress:
-            task = progress.add_task("Processing images", total=len(images))
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.threads) as executor:
-                future_to_image = {
-                    executor.submit(self.process_image, str(img_path)): img_path.name
-                    for img_path in images
-                }
-
-                for future in concurrent.futures.as_completed(future_to_image):
-                    img_name = future_to_image[future]
-                    try:
-                        text = future.result()
-                        with self.scan_lock:
-                            results[img_name] = text if text is not None else ""
-                    except Exception as exc:
-                        self.console.print(f"[red]{img_name} generated an exception: {exc}[/red]")
-                        with self.scan_lock:
-                            results[img_name] = ""
-
-                    progress.update(task, advance=1)
-
-        return dict(sorted(results.items(), key=timecode_key))
-
     def _prepare_image_b64(self, img_path: str) -> str:
-        # Normalize via Pillow using PNG (lossless) to preserve sharp Vietnamese accents (e.g. ư, ơ, dấu hỏi/ngã)
+        # Normalize via Pillow using fast PNG (lossless) to preserve sharp accents
         with Image.open(img_path) as img:
-            # Resize if dimensions are extreme
             min_dim = 50
             max_dim = 3000
             w, h = img.size
@@ -116,12 +59,11 @@ class BingOCR(OCREngine):
 
             return base64.b64encode(raw_bytes).decode("utf-8")
 
-
     def process_image(self, img_path: str) -> str:
         try:
             img_b64 = self._prepare_image_b64(img_path)
         except Exception as e:
-            print(f"Error preparing image '{img_path}': {e}")
+            self.console.log(f"[red]Error preparing image '{img_path}': {e}[/red]")
             return ""
 
         session = _get_bing_session()
@@ -155,13 +97,13 @@ class BingOCR(OCREngine):
                         break
 
                 if attempt == max_retries - 1:
-                    print(f"Failed to get token for {img_path}, status: {r1.status_code}")
+                    self.console.log(f"[yellow]Failed to get token for {img_path}, status: {r1.status_code}[/yellow]")
                     return ""
 
                 time.sleep(0.5 * (attempt + 1))
             except Exception as e:
                 if attempt == max_retries - 1:
-                    print(f"Upload error for {img_path}: {e}")
+                    self.console.log(f"[yellow]Upload error for {img_path}: {e}[/yellow]")
                     return ""
                 time.sleep(0.5 * (attempt + 1))
 
@@ -205,13 +147,13 @@ class BingOCR(OCREngine):
                     break
 
                 if attempt == max_retries - 1:
-                    print(f"Failed knowledge request for {img_path}, status: {r2.status_code}")
+                    self.console.log(f"[yellow]Failed knowledge request for {img_path}, status: {r2.status_code}[/yellow]")
                     return ""
 
                 time.sleep(0.5 * (attempt + 1))
             except Exception as e:
                 if attempt == max_retries - 1:
-                    print(f"Knowledge API error for {img_path}: {e}")
+                    self.console.log(f"[yellow]Knowledge API error for {img_path}: {e}[/yellow]")
                     return ""
                 time.sleep(0.5 * (attempt + 1))
 
@@ -268,31 +210,4 @@ class BingOCR(OCREngine):
 
                     all_lines.append({"text": txt, "cy": cy, "cx": cx, "h": h})
 
-            if not all_lines:
-                return ""
-
-            # Sort all lines from top to bottom
-            all_lines.sort(key=lambda item: item["cy"])
-
-            # Cluster lines that share approximately the same visual row
-            clusters: list[list[dict]] = []
-            for item in all_lines:
-                matched = False
-                for cluster in clusters:
-                    avg_cy = sum(x["cy"] for x in cluster) / len(cluster)
-                    avg_h = sum(x["h"] for x in cluster) / len(cluster)
-                    threshold = max(avg_h * 0.5, 0.06)
-                    if abs(item["cy"] - avg_cy) <= threshold:
-                        cluster.append(item)
-                        matched = True
-                        break
-                if not matched:
-                    clusters.append([item])
-
-            # Within each cluster (row), sort left to right and join with space
-            row_strings = []
-            for cluster in clusters:
-                cluster.sort(key=lambda item: item["cx"])
-                row_strings.append(" ".join(x["text"] for x in cluster))
-
-            return "\n".join(row_strings)
+            return cluster_lines_by_y(all_lines)

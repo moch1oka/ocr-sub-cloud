@@ -1,16 +1,28 @@
+[project]
+name = "ocr-sub"
+version = "0.2.0"
+description = "Extract and OCR subtitles from video files or extracted images using VideoSubFinder, Google Lens, and Bing Visual Search OCR."
+requires-python = ">=3.12"
+dependencies = [
+    "curl_cffi>=0.7.4",
+    "rich>=13.9.4",
+    "pillow>=11.1.0",
+    "betterproto==2.0.0b7",
+]
+
 [tool.isort]
-  combine_as_imports     = true
-  default_section        = "THIRDPARTY"
-  force_grid_wrap        = 0
-  include_trailing_comma = true         # Ensures compatibility with Black
-  known_first_party      = [  ]
-  line_length            = 120          # Matches Black's default line length
-  multi_line_output      = 0            # Preferred multi-line format
-  profile                = "black"      # Ensures isort follows Black's formatting style
-  skip_gitignore         = true
+combine_as_imports = true
+default_section = "THIRDPARTY"
+force_grid_wrap = 0
+include_trailing_comma = true
+known_first_party = ["ass", "bing", "engine", "gglens", "languages", "lens", "ocr", "progress", "srt", "utils", "vsf"]
+line_length = 120
+multi_line_output = 0
+profile = "black"
+skip_gitignore = true
 
 [tool.black]
-  include                   = '\.pyi?$' # Formats only Python files
-  line_length               = 120       # Consistent with isort
-  skip-string-normalization = false     # Set to true if you don’t want Black to change string quotes
-  target-version            = [  ]      # Adjust as per your Python versions
+include = '\.pyi?$'
+line_length = 120
+skip-string-normalization = false
+target-version = ["py312"]

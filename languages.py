@@ -83,9 +83,18 @@ LANGUAGE_PRESETS: Dict[str, LanguageConfig] = {
 }
 
 
+import warnings
+
+
 def get_language_config(code: str | None) -> LanguageConfig:
     """Returns the LanguageConfig for the specified language code (default: 'vi')."""
     if not code:
         return LANGUAGE_PRESETS["vi"]
     normalized = code.strip().lower()
-    return LANGUAGE_PRESETS.get(normalized, LANGUAGE_PRESETS["vi"])
+    if normalized not in LANGUAGE_PRESETS:
+        warnings.warn(
+            f"Language preset '{code}' is not recognized. Falling back to 'vi'. "
+            f"Available presets: {list(LANGUAGE_PRESETS.keys())}"
+        )
+        return LANGUAGE_PRESETS["vi"]
+    return LANGUAGE_PRESETS[normalized]

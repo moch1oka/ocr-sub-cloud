@@ -5,7 +5,10 @@ from pathlib import Path
 
 from utils import get_in_path
 
-cur_dir = Path(__file__).resolve().parent
+
+class VSFError(Exception):
+    """Raised when VideoSubFinder execution fails."""
+    pass
 
 
 class VideoSubFinder:
@@ -43,10 +46,16 @@ class VideoSubFinder:
         else:
             self.exe_path = vsf_exe_path
 
-        if self.exe_path is None or not os.access(self.exe_path, os.X_OK):
-            raise ValueError("VSF Exe path must not be None.")
+        if self.exe_path is None:
+            raise FileNotFoundError(
+                "VideoSubFinderWXW executable not found. Please place VideoSubFinder in PATH or specify via -vsf."
+            )
+        if not os.access(self.exe_path, os.X_OK):
+            raise PermissionError(
+                f"VideoSubFinderWXW executable at '{self.exe_path}' is not accessible or not executable."
+            )
 
-        # Tự động nạp settings/general.cfg cùng thư mục với VideoSubFinderWXW.exe
+        # Auto-detect settings/general.cfg located next to VideoSubFinderWXW.exe
         if general_settings is None:
             auto_cfg = Path(self.exe_path).resolve().parent / "settings" / "general.cfg"
             if auto_cfg.is_file():
@@ -57,7 +66,7 @@ class VideoSubFinder:
 
         self.txtimage = create_cleared_text_images
 
-        # Các cờ điều khiển thực thi cơ bản
+        # Core execution flags
         run_list = [self.exe_path]
         if clear_dirs:
             run_list.append("--clear_dirs")
@@ -74,7 +83,7 @@ class VideoSubFinder:
         if general_settings:
             run_list.extend(["--general_settings", general_settings])
 
-        # Các tham số override (CHỈ thêm nếu người dùng chủ động truyền khác None)
+        # CLI overrides (only added if user explicitly specified a non-None value)
         cli_overrides = {
             "start_time": start_time,
             "end_time": end_time,
@@ -108,21 +117,12 @@ class VideoSubFinder:
 
         self.run_list = run_list
 
-
     def __call__(self, video_path: str | Path, output_dir: str | Path):
         cmd = list(self.run_list) + ["--input_video", str(video_path), "--output_dir", str(output_dir)]
         exe_dir = str(Path(self.exe_path).resolve().parent)
-        
-        try:
-            _ = subprocess.run(
-                cmd,
-                cwd=exe_dir,
-                check=False,
+
+        proc = subprocess.run(cmd, cwd=exe_dir)
+        if proc.returncode != 0:
+            raise VSFError(
+                f"VideoSubFinder failed with exit code {proc.returncode} for video '{video_path}'."
             )
-        except Exception as e:
-            raise e
-
-
-
-class VSFError(Exception):
-    pass

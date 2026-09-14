@@ -54,9 +54,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
+def format_ass_dialogue(start_ms: int, end_ms: int, text_content: str, is_top: bool = False) -> str:
+    """Formats a dialogue line into standard ASS syntax."""
+    start_ts = format_ass_timestamp(start_ms)
+    end_ts = format_ass_timestamp(end_ms)
+    style = "Top" if is_top else "Default"
+    processed_text = text_content.replace("\n", r"\N")
+    return f"Dialogue: 0,{start_ts},{end_ts},{style},,0,0,0,,{processed_text}\n"
+
+
 class AssSubtitle:
     """Represents a single Advanced SubStation Alpha (.ass) dialogue line."""
-    ASS_HEADER = get_ass_header("Arial")
 
     def __init__(self, start_time: int | str, end_time: int | str, text_content: str, is_top: bool = False):
         if isinstance(start_time, int):

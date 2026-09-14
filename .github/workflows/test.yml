@@ -39,29 +39,29 @@ jobs:
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
         shell: powershell
 
-      - name: Remove existing output_subtitles.ass (Linux)
+      - name: Clean outputs before test (Linux)
         if: runner.os == 'Linux'
-        run: |
-          rm -f output_subtitles.ass
+        run: rm -rf outputs
         shell: bash
 
-      - name: Remove existing output_subtitles.ass (Windows)
+      - name: Clean outputs before test (Windows)
         if: runner.os == 'Windows'
-        run: |
-          if (Test-Path output_subtitles.ass) { Remove-Item output_subtitles.ass }
+        run: if (Test-Path outputs) { Remove-Item -Recurse -Force outputs }
         shell: powershell
 
-      - name: Run test
-        run: python run.py --img_dir test
+      - name: Run OCR test (Google Lens, dual format output)
+        run: python run.py --img_dir test -f both
 
-      - name: Check if output_subtitles.ass exists (Linux)
+      - name: Check output subtitle files (Linux)
         if: runner.os == 'Linux'
         run: |
           if [ ! -f outputs/output_subtitles.ass ]; then echo "output_subtitles.ass not found!" && exit 1; fi
+          if [ ! -f outputs/output_subtitles.srt ]; then echo "output_subtitles.srt not found!" && exit 1; fi
         shell: bash
 
-      - name: Check if output_subtitles.ass exists (Windows)
+      - name: Check output subtitle files (Windows)
         if: runner.os == 'Windows'
         run: |
           if (!(Test-Path outputs/output_subtitles.ass)) { Write-Host "output_subtitles.ass not found!"; exit 1 }
+          if (!(Test-Path outputs/output_subtitles.srt)) { Write-Host "output_subtitles.srt not found!"; exit 1 }
         shell: powershell
