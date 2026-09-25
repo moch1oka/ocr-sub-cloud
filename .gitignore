@@ -57,6 +57,7 @@ desktop.ini
 *.out
 *.err
 
-# Output folders
+# Output and scratch folders
 outputs/
 outputs*/
+scratch/

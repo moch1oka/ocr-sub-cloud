@@ -10,18 +10,29 @@ from PIL import Image
 
 from engine import OCREngine, cluster_lines_by_y
 
+from curl_cffi.requests import CurlHttpVersion
+
 _local_session = threading.local()
 
 
 def _get_bing_session() -> requests.Session:
     if not hasattr(_local_session, "session"):
-        _local_session.session = requests.Session(impersonate="chrome")
+        _local_session.session = requests.Session(
+            impersonate="chrome",
+            http_version=CurlHttpVersion.V1_1,
+        )
     return _local_session.session
 
 
 class BingOCR(OCREngine):
-    def __init__(self, threads: int = 16, line_break_mode: str = "y_cluster", lang: str = "vi"):
-        super().__init__(threads=threads, line_break_mode=line_break_mode, lang=lang)
+    def __init__(
+        self,
+        threads: int = 16,
+        line_break_mode: str = "y_cluster",
+        lang: str = "vi",
+        detect_italic: bool = False,
+    ):
+        super().__init__(threads=threads, line_break_mode=line_break_mode, lang=lang, detect_italic=detect_italic)
         self.upload_url = (
             f"https://www.bing.com/images/search?view=detailv2&iss=sbiupload"
             f"&setlang={self.lang_cfg.bing_setlang}&mkt={self.lang_cfg.bing_mkt}"
@@ -173,12 +184,55 @@ class BingOCR(OCREngine):
         if not regions:
             return ""
 
+        img_gray = None
+        if self.detect_italic:
+            try:
+                import cv2
+
+                img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                img_gray = None
+
+        def _is_line_italic(quad) -> bool:
+            if img_gray is None or not quad:
+                return False
+            try:
+                from utils import is_italic_patch
+
+                if not all(k in quad for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")):
+                    return False
+                xs = [quad[k]["x"] for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")]
+                ys = [quad[k]["y"] for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")]
+                h_img, w_img = img_gray.shape[:2]
+                if max(xs) <= 1.0 and max(ys) <= 1.0:
+                    min_x, max_x = min(xs) * w_img, max(xs) * w_img
+                    min_y, max_y = min(ys) * h_img, max(ys) * h_img
+                else:
+                    min_x, max_x = min(xs), max(xs)
+                    min_y, max_y = min(ys), max(ys)
+
+                pad_x = (max_x - min_x) * 0.05
+                pad_y = (max_y - min_y) * 0.05
+                x1 = int(max(0, min_x - pad_x))
+                x2 = int(min(w_img, max_x + pad_x))
+                y1 = int(max(0, min_y - pad_y))
+                y2 = int(min(h_img, max_y + pad_y))
+
+                if x2 - x1 < 10 or y2 - y1 < 8:
+                    return False
+
+                return is_italic_patch(img_gray[y1:y2, x1:x2])
+            except Exception:
+                return False
+
         if self.line_break_mode == "line":
             lines_text = []
             for r in regions:
                 for l in r.get("lines", []):
                     txt = l.get("text", "").strip()
                     if txt:
+                        if self.detect_italic and _is_line_italic(l.get("boundingBox")):
+                            txt = f"{{\\i1}}{txt}{{\\i0}}"
                         lines_text.append(txt)
             return "\n".join(lines_text)
 
@@ -208,6 +262,7 @@ class BingOCR(OCREngine):
                         cx = 0.5
                         h = 0.1
 
-                    all_lines.append({"text": txt, "cy": cy, "cx": cx, "h": h})
+                    is_ita = _is_line_italic(quad) if self.detect_italic else False
+                    all_lines.append({"text": txt, "cy": cy, "cx": cx, "h": h, "is_italic": is_ita})
 
             return cluster_lines_by_y(all_lines)

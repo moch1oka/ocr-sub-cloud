@@ -33,11 +33,15 @@ def apply_punctuation_and_spacing(text: str) -> str:
     # Remove extra spaces before punctuation
     text = re.sub(r"\s+([,.!?…])", r"\1", text)
 
-    # Ensure single space after punctuation, except for multiple punctuation marks and numbers/decimals
-    text = re.sub(r"([,.!?…])(?!\s)(?![,.!?…])(?!\d)", r"\1 ", text)
+    # Ensure single space after punctuation, except for multiple punctuation marks, numbers/decimals, and quotes/brackets/braces
+    text = re.sub(r"([,.!?…])(?!\s)(?![,.!?…])(?!\d)(?![)\"\'’”›»\]\}\{])", r"\1 ", text)
 
     # Remove space between multiple punctuation marks
     text = re.sub(r"([,.!?…])\s+([,.!?…])", r"\1\2", text)
+
+    # Clean whitespace around formatting tags
+    text = re.sub(r"(\{\\i1\}|<i\s*>)\s+", r"\1", text)
+    text = re.sub(r"\s+(\{\\i0\}|</i\s*>)", r"\1", text)
 
     return text.strip()
 
@@ -84,7 +88,7 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
             r"\u4E00-\u9FFF"  # CJK Unified Ideographs
             r"\uF900-\uFAFF"  # CJK Compatibility
             r"\uFF00-\uFFEF"  # Halfwidth & Fullwidth Forms
-            r"!\[\]_\$ /\\:\'\" ,.\?;\-+=()*%@~…"
+            r"!\[\]_\$ /\\:\'\" ,.\?;\-+=()*%@~…{}"
             r"]"
         )
         text = re.sub(pattern, "", text)
@@ -93,8 +97,8 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
         # Latin / Vietnamese mode
         text = fix_quotes(text)
 
-        # Preserve apostrophes/single quotes, semicolons, ellipses, and common punctuation
-        allowed_special_chars = r' ![]_$ /\\:\'" ,.?;\-+=()*%@~…'
+        # Preserve apostrophes/single quotes, semicolons, ellipses, braces, and common punctuation
+        allowed_special_chars = r' ![]_{}$ /\\:\'" ,.?;\-+=()*%@~…'
         pattern = re.compile(
             rf"[^\sa-zA-Z"
             r"\u00C0-\u017F"  # Latin Extended-A
@@ -122,17 +126,28 @@ def get_image_raw_bytes_and_dims(image_path: str) -> tuple[bytes, int, int] | No
 
     try:
         with Image.open(image_path) as img:
-            width = img.width
-            height = img.height
+            width, height = img.size
+            img_format = (img.format or "").upper()
             max_pixels = 3_000_000
+
+            # If image doesn't need downscaling and is already JPEG or PNG, read file directly
+            if width * height <= max_pixels and img_format in ("JPEG", "PNG"):
+                with open(image_path, "rb") as f:
+                    return (f.read(), width, height)
+
+            # Downscale if exceeding max_pixels
             if width * height > max_pixels:
                 aspect_ratio = width / height
                 new_w = int(math.sqrt(max_pixels * aspect_ratio))
                 new_h = int(new_w / aspect_ratio)
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 width, height = img.size
+
             image_bytes = io.BytesIO()
-            img.save(image_bytes, format="PNG", compress_level=1)
+            if img.mode in ("RGBA", "LA", "P"):
+                img.save(image_bytes, format="PNG", compress_level=1)
+            else:
+                img.save(image_bytes, format="JPEG", quality=90)
             return (image_bytes.getvalue(), width, height)
 
     except FileNotFoundError:
@@ -272,19 +287,76 @@ def timecode_key(item):
     except (IndexError, ValueError):
         return (99, 99, 99, 999999)
 
+def is_italic_patch(gray_patch, threshold_angle: float = 8.0) -> bool:
+    """
+    Detects whether a cropped grayscale image patch containing text is italic
+    by measuring vertical projection profile variance under affine shear angles.
+    """
+    if gray_patch is None or not hasattr(gray_patch, "shape"):
+        return False
+    h, w = gray_patch.shape[:2]
+    if h < 8 or w < 12:
+        return False
+
+    try:
+        import cv2
+        import numpy as np
+
+        _, thresh = cv2.threshold(gray_patch, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        border_mean = (thresh[0, :].mean() + thresh[-1, :].mean() + thresh[:, 0].mean() + thresh[:, -1].mean()) / 4.0
+        if border_mean > 127:
+            thresh = cv2.bitwise_not(thresh)
+
+        if np.count_nonzero(thresh) < 20:
+            return False
+
+        # Test shear angles in degrees (-4 to 20)
+        angles = [-4, 0, 4, 8, 11, 14, 17, 20]
+        variances = []
+        for angle in angles:
+            rad = np.radians(angle)
+            tan_a = float(np.tan(rad))
+            new_w = w + int(h * abs(tan_a))
+            offset_x = 0.0 if tan_a >= 0 else float(int(h * abs(tan_a)))
+            M = np.float32([[1, tan_a, offset_x], [0, 1, 0]])
+            sheared = cv2.warpAffine(thresh, M, (new_w, h), flags=cv2.INTER_NEAREST)
+            proj = np.sum(sheared, axis=0)
+            variances.append(float(np.var(proj)))
+
+        best_idx = int(np.argmax(variances))
+        best_angle = angles[best_idx]
+        var_0 = variances[1]  # angle 0
+        var_best = variances[best_idx]
+
+        return bool((best_angle >= threshold_angle) and (var_best > var_0 * 1.05))
+    except Exception:
+        return False
+
+
 def create_ocr_engine(ocr_engine_type: OCREngineType, args) -> OCREngine:
     from engine import OCREngineType
     line_break_mode = getattr(args, "line_break_mode", "y_cluster")
     lang = getattr(args, "lang", "vi")
+    detect_italic = getattr(args, "detect_italic", False)
 
     if ocr_engine_type == OCREngineType.GGLENS:
         from gglens import GoogleLens
-        return GoogleLens(threads=args.gglens_thread, line_break_mode=line_break_mode, lang=lang)
+        return GoogleLens(
+            threads=args.gglens_thread,
+            line_break_mode=line_break_mode,
+            lang=lang,
+            detect_italic=detect_italic,
+        )
 
     elif ocr_engine_type == OCREngineType.BING:
         from bing import BingOCR
         threads = getattr(args, "bing_thread", 16)
-        return BingOCR(threads=threads, line_break_mode=line_break_mode, lang=lang)
+        return BingOCR(
+            threads=threads,
+            line_break_mode=line_break_mode,
+            lang=lang,
+            detect_italic=detect_italic,
+        )
 
     else:
         raise ValueError(f"Unknown OCR engine: {ocr_engine_type}")

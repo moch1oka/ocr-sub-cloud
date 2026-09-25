@@ -1,4 +1,6 @@
 curl_cffi>=0.7.4
 rich>=13.9.4
 pillow>=11.1.0
-betterproto==2.0.0b7
+protobuf>=4.25.0
+opencv-python>=4.8.0
+numpy>=1.26.0

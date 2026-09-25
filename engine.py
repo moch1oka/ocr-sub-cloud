@@ -13,9 +13,43 @@ from progress import ImageSecondSpeedColumn
 from utils import collect_images, timecode_key
 
 
+def format_cluster_row(cluster: list[dict]) -> str:
+    """Formats a visual row, wrapping italic text in {\\i1}...{\\i0} tags if present."""
+    if not cluster:
+        return ""
+
+    has_italic = any(l.get("is_italic") for l in cluster)
+    if not has_italic:
+        return " ".join(l["text"] for l in cluster)
+
+    # If every item in the row is italic, wrap the entire row
+    if all(l.get("is_italic") for l in cluster):
+        return f"{{\\i1}}{' '.join(l['text'] for l in cluster)}{{\\i0}}"
+
+    # Mixed: group adjacent items with the same italic state
+    parts = []
+    curr_italic = None
+    curr_words = []
+    for l in cluster:
+        is_ita = bool(l.get("is_italic"))
+        if is_ita == curr_italic:
+            curr_words.append(l["text"])
+        else:
+            if curr_words:
+                text_chunk = " ".join(curr_words)
+                parts.append(f"{{\\i1}}{text_chunk}{{\\i0}}" if curr_italic else text_chunk)
+            curr_italic = is_ita
+            curr_words = [l["text"]]
+    if curr_words:
+        text_chunk = " ".join(curr_words)
+        parts.append(f"{{\\i1}}{text_chunk}{{\\i0}}" if curr_italic else text_chunk)
+
+    return " ".join(parts)
+
+
 def cluster_lines_by_y(lines: List[dict]) -> str:
     """
-    Clusters a list of text lines (each having 'text', 'cy', 'cx', 'h')
+    Clusters a list of text lines (each having 'text', 'cy', 'cx', 'h', and optional 'is_italic')
     by their normalized vertical center Y coordinate into visual rows.
     Rows are sorted top-to-bottom, and words within each row are sorted left-to-right.
     """
@@ -44,7 +78,7 @@ def cluster_lines_by_y(lines: List[dict]) -> str:
     row_strings = []
     for cluster in clusters:
         cluster.sort(key=lambda item: item["cx"])
-        row_strings.append(" ".join(l["text"] for l in cluster))
+        row_strings.append(format_cluster_row(cluster))
 
     return "\n".join(row_strings)
 
@@ -57,10 +91,12 @@ class OCREngine(ABC):
         threads: int = 16,
         line_break_mode: str = "y_cluster",
         lang: str = "vi",
+        detect_italic: bool = False,
     ):
         self.threads = threads
         self.line_break_mode = line_break_mode
         self.lang = lang
+        self.detect_italic = detect_italic
         self.lang_cfg: LanguageConfig = get_language_config(lang)
         self.scan_lock = Lock()
         self.console = Console()

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
+import re
 import warnings
 
 from ass import format_ass_dialogue, get_ass_header
@@ -24,6 +25,22 @@ class SubtitleItem:
         return format_srt_block(self.start_ms, self.end_ms, self.text_content, index, self.is_top)
 
 
+def _strip_tags(text: str) -> str:
+    """Strips ASS and SRT formatting tags for pure text comparison."""
+    return re.sub(r"\{\\[^}]*\}|<[^>]*>", "", text)
+
+
+def _pick_best(prev: str, curr: str) -> str:
+    """Prefers text that contains styling tags (e.g. italics) or is more complete."""
+    p_has_fmt = r"{\i" in prev or "<i>" in prev
+    c_has_fmt = r"{\i" in curr or "<i>" in curr
+    if c_has_fmt and not p_has_fmt:
+        return curr
+    if p_has_fmt and not c_has_fmt:
+        return prev
+    return curr if len(curr) >= len(prev) else prev
+
+
 def should_merge_subtitles(
     prev_text: str, curr_text: str, gap_ms: int, lang: str = "vi"
 ) -> tuple[bool, str]:
@@ -42,18 +59,16 @@ def should_merge_subtitles(
 
     # Exact match (case-insensitive)
     if p.lower() == c.lower():
-        best = c if len(c) > len(p) else p
-        return True, best
+        return True, _pick_best(p, c)
 
-    # Normalize line breaks for comparison
-    p_norm = p.replace(r"\N", " ").replace(r"\n", " ")
-    c_norm = c.replace(r"\N", " ").replace(r"\n", " ")
+    # Normalize line breaks and formatting tags for comparison
+    p_norm = _strip_tags(p).replace(r"\N", " ").replace(r"\n", " ").strip()
+    c_norm = _strip_tags(c).replace(r"\N", " ").replace(r"\n", " ").strip()
     p_lower = p_norm.lower()
     c_lower = c_norm.lower()
 
     if p_lower == c_lower:
-        best = c if len(c) >= len(p) else p
-        return True, best
+        return True, _pick_best(p, c)
 
     cfg = get_language_config(lang)
     max_len_diff = 2 if cfg.cjk_mode else 3
@@ -61,8 +76,7 @@ def should_merge_subtitles(
     # Substring match with small length difference
     len_diff = abs(len(p_lower) - len(c_lower))
     if (p_lower in c_lower or c_lower in p_lower) and len_diff <= max_len_diff:
-        best = c if len(c) >= len(p) else p
-        return True, best
+        return True, _pick_best(p, c)
 
     # Fuzzy similarity using difflib
     ratio = SequenceMatcher(None, p_lower, c_lower).ratio()
@@ -70,16 +84,16 @@ def should_merge_subtitles(
     threshold = cfg.fuzzy_threshold_short if min_len < 10 else cfg.fuzzy_threshold_long
 
     if ratio >= threshold:
-        has_p_punct = p[-1] in ".!?…\"'。！？"
-        has_c_punct = c[-1] in ".!?…\"'。！？"
+        p_clean = _strip_tags(p).strip()
+        c_clean = _strip_tags(c).strip()
+        has_p_punct = p_clean[-1] in ".!?…\"'。！？" if p_clean else False
+        has_c_punct = c_clean[-1] in ".!?…\"'。！？" if c_clean else False
         if has_c_punct and not has_p_punct:
             best = c
         elif has_p_punct and not has_c_punct:
             best = p
-        elif len(c) >= len(p):
-            best = c
         else:
-            best = p
+            best = _pick_best(p, c)
         return True, best
 
     return False, ""

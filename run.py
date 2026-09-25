@@ -2,15 +2,17 @@ import argparse
 from argparse import BooleanOptionalAction
 from pathlib import Path
 
+from dvdsub import DvdSupParser, VobSubParser, detect_sup_type, save_dvd_images
 from engine import OCREngine, OCREngineType
 from ocr import OCR_Subtitles
+from pgs import PgsParser, save_pgs_images
 from utils import create_ocr_engine, float_range, ocr_engine_type
 from vsf import VideoSubFinder
 
 
 def create_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="A tool to OCR subtitles from video files or extracted images using VideoSubFinder, Google Lens, and Bing OCR."
+        description="A tool to OCR subtitles from video files, Blu-ray PGS (.sup), DVD-SUP (.sup), DVD VobSub (.sub/.idx), or extracted images using VideoSubFinder, Google Lens, and Bing OCR."
     )
     parser.add_argument(
         "-o",
@@ -36,6 +38,48 @@ def create_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="The full path of directory contain extracted images, when specified this will skip image extract step.",
+    )
+
+    parser.add_argument(
+        "--sup",
+        type=str,
+        default=None,
+        help="The path of subtitle file (.sup), supporting both Blu-ray PGS and DVD-SUP. Can also be passed via -i / --video_dir.",
+    )
+
+    parser.add_argument(
+        "--vobsub",
+        type=str,
+        default=None,
+        help="The path of DVD VobSub file (.sub). Can also be passed via -i / --video_dir.",
+    )
+
+    parser.add_argument(
+        "--idx",
+        type=str,
+        default=None,
+        help="The path of DVD VobSub index file (.idx). Optional if located in the same directory as .sub.",
+    )
+
+    parser.add_argument(
+        "--ifo",
+        type=str,
+        default=None,
+        help="The path of DVD IFO file (.ifo) for DVD-SUP palette. Optional if located in the same directory as .sup.",
+    )
+
+    parser.add_argument(
+        "--stream_id",
+        type=int,
+        default=None,
+        help="Stream ID for DVD VobSub when multiple languages exist. Default: auto.",
+    )
+
+    parser.add_argument(
+        "--forced_only",
+        action="store_true",
+        default=False,
+        help="Only extract and OCR forced subtitles from PGS / DVD subtitle file. Default: False",
     )
 
     parser.add_argument(
@@ -76,8 +120,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
     ocr_group.add_argument(
         "--gglens_thread",
         type=int,
-        default=16,
-        help="Google Lens OCR threads. Default: 16",
+        default=32,
+        help="Google Lens OCR threads (e.g. 32-80 threads for 20-30 img/s). Default: 32",
     )
     # Bing OCR settings
     ocr_group.add_argument(
@@ -94,6 +138,12 @@ def create_arg_parser() -> argparse.ArgumentParser:
         default="y_cluster",
         help="Line break detection mode: 'y_cluster' (smart Y-coordinate clustering, recommended), 'line' (break on every line), 'paragraph' (break only on paragraphs). Default: y_cluster",
     )
+    ocr_group.add_argument(
+        "--detect_italic",
+        action=BooleanOptionalAction,
+        default=False,
+        help="Enable local detection and preservation of italic text (e.g. {\\i1} in ASS, <i> in SRT). Default: False",
+    )
 
     vsf_param_group = parser.add_argument_group(title="VideoSubFinder")
     vsf_param_group.add_argument(
@@ -108,7 +158,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--video_dir",
         type=str,
         default=None,
-        help="The path of video or the path of video directory.",
+        help="The path of video, directory of videos, Blu-ray PGS (.sup), DVD-SUP (.sup), or DVD VobSub (.sub / .idx).",
     )
     vsf_param_group.add_argument(
         "--clear_dirs",
@@ -264,6 +314,105 @@ def create_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def process_sup(
+    sup_path: Path,
+    output_dir: str,
+    ocr_engine: OCREngine,
+    subtitle_format: str = "ass",
+    lang: str = "vi",
+    output_subtitles_name: str | None = None,
+    font: str | None = None,
+    forced_only: bool = False,
+    ifo_path: str | Path | None = None,
+):
+    if not sup_path.is_file():
+        raise FileNotFoundError(f"Subtitle file not found: {sup_path}")
+
+    save_name = Path(output_subtitles_name).stem if output_subtitles_name else sup_path.stem
+    save_dir = Path(output_dir) / save_name
+
+    sup_type = detect_sup_type(sup_path)
+    if sup_type == "dvd":
+        target_images_dir = save_dir / "DvdSup_Images"
+        print(f"Detected DVD-SUP format in '{sup_path}'")
+        dvd_parser = DvdSupParser(sup_path, ifo_path=ifo_path)
+        subtitles = dvd_parser.parse(forced_only=forced_only)
+
+        if not subtitles:
+            print(f"No subtitle pictures found in {sup_path}")
+            return
+
+        print(f"Extracted {len(subtitles)} DVD subtitle pictures. Saving cropped images to {target_images_dir} ...")
+        save_dvd_images(subtitles, target_images_dir)
+    else:
+        target_images_dir = save_dir / "PGS_Images"
+        print(f"Parsing Blu-ray PGS file '{sup_path}' ...")
+        pgs_parser = PgsParser(sup_path)
+        subtitles = pgs_parser.parse(forced_only=forced_only)
+
+        if not subtitles:
+            print(f"No subtitle pictures found in {sup_path}")
+            return
+
+        print(f"Extracted {len(subtitles)} subtitle pictures. Saving cropped images to {target_images_dir} ...")
+        save_pgs_images(subtitles, target_images_dir)
+
+    print(f"Running {ocr_engine.engine_name} on extracted images ...")
+    ocr = OCR_Subtitles(
+        output_subtitles_name=save_name,
+        output_directory=save_dir,
+        images_dir_override=target_images_dir,
+        ocr_engine=ocr_engine,
+        subtitle_format=subtitle_format,
+        lang=lang,
+        font=font,
+    )
+    ocr()
+
+
+def process_vobsub(
+    sub_path: Path,
+    output_dir: str,
+    ocr_engine: OCREngine,
+    idx_path: str | Path | None = None,
+    subtitle_format: str = "ass",
+    lang: str = "vi",
+    output_subtitles_name: str | None = None,
+    font: str | None = None,
+    stream_id: int | None = None,
+    forced_only: bool = False,
+):
+    if not sub_path.is_file():
+        raise FileNotFoundError(f"VobSub file not found: {sub_path}")
+
+    save_name = Path(output_subtitles_name).stem if output_subtitles_name else sub_path.stem
+    save_dir = Path(output_dir) / save_name
+    vobsub_images_dir = save_dir / "VobSub_Images"
+
+    print(f"Parsing DVD VobSub file '{sub_path}' ...")
+    parser = VobSubParser(sub_path, idx_path=idx_path)
+    subtitles = parser.parse(stream_id=stream_id, lang_code=lang, forced_only=forced_only)
+
+    if not subtitles:
+        print(f"No subtitle pictures found in {sub_path}")
+        return
+
+    print(f"Extracted {len(subtitles)} VobSub subtitle pictures. Saving cropped images to {vobsub_images_dir} ...")
+    save_dvd_images(subtitles, vobsub_images_dir)
+
+    print(f"Running {ocr_engine.engine_name} on extracted VobSub images ...")
+    ocr = OCR_Subtitles(
+        output_subtitles_name=save_name,
+        output_directory=save_dir,
+        images_dir_override=vobsub_images_dir,
+        ocr_engine=ocr_engine,
+        subtitle_format=subtitle_format,
+        lang=lang,
+        font=font,
+    )
+    ocr()
+
+
 def process_vsf(
     video_list: list[Path],
     output_dir: str,
@@ -318,6 +467,7 @@ def main():
     ocr_engine: OCREngine = create_ocr_engine(args.ocr_engine, args)
     output_dir: str = args.output_dir
 
+    # 1. OCR from extracted images directory
     if args.img_dir:
         subtitle_name = args.output_subtitles or "output_subtitles"
         ocr = OCR_Subtitles(
@@ -332,10 +482,55 @@ def main():
         ocr()
         return
 
-    # Process video with VideoSubFinder
+    # 2. OCR from DVD VobSub (.sub / .idx)
+    vobsub_candidate = args.vobsub or (
+        args.video_dir if args.video_dir and Path(args.video_dir).suffix.lower() in [".sub", ".idx"] else None
+    )
+    if vobsub_candidate:
+        cand_path = Path(vobsub_candidate)
+        if cand_path.suffix.lower() == ".idx":
+            sub_path = cand_path.with_suffix(".sub")
+            idx_path = cand_path
+        else:
+            sub_path = cand_path
+            idx_path = Path(args.idx) if args.idx else None
+
+        process_vobsub(
+            sub_path=sub_path,
+            output_dir=output_dir,
+            ocr_engine=ocr_engine,
+            idx_path=idx_path,
+            subtitle_format=args.format,
+            lang=args.lang,
+            output_subtitles_name=args.output_subtitles,
+            font=args.font,
+            stream_id=args.stream_id,
+            forced_only=args.forced_only,
+        )
+        return
+
+    # 3. OCR from subtitle file (.sup: Blu-ray PGS or DVD-SUP)
+    sup_candidate = args.sup or (
+        args.video_dir if args.video_dir and Path(args.video_dir).suffix.lower() == ".sup" else None
+    )
+    if sup_candidate:
+        process_sup(
+            sup_path=Path(sup_candidate),
+            output_dir=output_dir,
+            ocr_engine=ocr_engine,
+            subtitle_format=args.format,
+            lang=args.lang,
+            output_subtitles_name=args.output_subtitles,
+            font=args.font,
+            forced_only=args.forced_only,
+            ifo_path=args.ifo,
+        )
+        return
+
+    # 4. Process video with VideoSubFinder
     video_path = args.video_dir
     if video_path is None:
-        parser.error("--video_dir (or --img_dir) is required")
+        parser.error("--video_dir, --sup, --vobsub, or --img_dir is required")
 
     video_formats = {".mp4", ".avi", ".mov", ".mkv"}
     vsf = VideoSubFinder(**vars(args))
