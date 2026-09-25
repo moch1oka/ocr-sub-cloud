@@ -10,7 +10,13 @@ from PIL import Image
 
 from engine import OCREngine, cluster_lines_by_y
 
-from curl_cffi.requests import CurlHttpVersion
+try:
+    from curl_cffi import CurlHttpVersion
+except ImportError:
+    try:
+        from curl_cffi.curl import CurlHttpVersion
+    except ImportError:
+        from curl_cffi.requests import CurlHttpVersion
 
 _local_session = threading.local()
 

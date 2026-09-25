@@ -15,7 +15,13 @@ from lens import (
 )
 from utils import get_image_raw_bytes_and_dims
 
-from curl_cffi.requests import CurlHttpVersion
+try:
+    from curl_cffi import CurlHttpVersion
+except ImportError:
+    try:
+        from curl_cffi.curl import CurlHttpVersion
+    except ImportError:
+        from curl_cffi.requests import CurlHttpVersion
 
 _local_session = threading.local()
 
