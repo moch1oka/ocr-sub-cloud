@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Extract and OCR subtitles from video files or extracted images using VideoSubFinder, Google Lens, and Bing Visual Search OCR."
 requires-python = ">=3.12"
 dependencies = [
-    "curl_cffi>=0.7.4",
+    "curl_cffi>=0.16.0",
     "rich>=13.9.4",
     "pillow>=11.1.0",
     "protobuf>=4.25.0",

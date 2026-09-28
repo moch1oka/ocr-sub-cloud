@@ -127,8 +127,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
     ocr_group.add_argument(
         "--bing_thread",
         type=int,
-        default=16,
-        help="Bing OCR threads. Default: 16",
+        default=32,
+        help="Bing OCR threads. Default: 32",
     )
 
     ocr_group.add_argument(

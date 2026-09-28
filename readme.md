@@ -142,7 +142,7 @@ python run.py -vsf "E:\VideoSubFinder\Release_x64\VideoSubFinderWXW.exe" -i "pat
   --gglens_thread GGLENS_THREAD
                         Google Lens OCR threads (e.g. 32-80 threads for 20-30 img/s). Default: 32
   --bing_thread BING_THREAD
-                        Bing OCR threads. Default: 16
+                        Bing OCR threads. Default: 32
   --line_break_mode {y_cluster,line,paragraph}
                         Line break detection mode:
                         - 'y_cluster': Smart Y-coordinate clustering (recommended)

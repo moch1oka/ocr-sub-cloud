@@ -5,18 +5,10 @@ import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
-from curl_cffi import requests
+from curl_cffi import CurlHttpVersion, CurlMime, requests
 from PIL import Image
 
 from engine import OCREngine, cluster_lines_by_y
-
-try:
-    from curl_cffi import CurlHttpVersion
-except ImportError:
-    try:
-        from curl_cffi.curl import CurlHttpVersion
-    except ImportError:
-        from curl_cffi.requests import CurlHttpVersion
 
 _local_session = threading.local()
 
@@ -48,37 +40,49 @@ class BingOCR(OCREngine):
     def engine_name(self) -> str:
         return "Bing OCR"
 
-    def _prepare_image_b64(self, img_path: str) -> str:
-        # Normalize via Pillow using fast PNG (lossless) to preserve sharp accents
-        with Image.open(img_path) as img:
-            min_dim = 50
-            max_dim = 3000
-            w, h = img.size
-            if w < min_dim or h < min_dim:
-                scale = max(min_dim / w, min_dim / h)
-                img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-            elif w > max_dim or h > max_dim:
-                scale = min(max_dim / w, max_dim / h)
-                img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+    def _prepare_image_data(self, img_path: str) -> tuple[str, bytes]:
+        min_dim = 50
+        max_dim = 3000
+        try:
+            with Image.open(img_path) as img:
+                w, h = img.size
+                fmt = (img.format or "").upper()
 
-            # Try fast lossless PNG first
-            buf = io.BytesIO()
-            img.save(buf, format="PNG", compress_level=1)
-            raw_bytes = buf.getvalue()
+                # Fast path: if already a valid PNG/JPEG <= 750KB with good dimensions, read raw bytes directly
+                if min_dim <= w <= max_dim and min_dim <= h <= max_dim and fmt in ("PNG", "JPEG"):
+                    with open(img_path, "rb") as f:
+                        raw_bytes = f.read()
+                    if len(raw_bytes) <= 750000:
+                        return base64.b64encode(raw_bytes).decode("ascii"), raw_bytes
 
-            # If PNG exceeds Bing's web limit (~750KB), compress with high-quality JPEG
-            if len(raw_bytes) > 750000:
-                if img.mode in ("RGBA", "LA", "P"):
-                    img = img.convert("RGB")
+                # Otherwise resize or re-encode
+                if w < min_dim or h < min_dim:
+                    scale = max(min_dim / w, min_dim / h)
+                    img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+                elif w > max_dim or h > max_dim:
+                    scale = min(max_dim / w, max_dim / h)
+                    img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=92, optimize=True)
+                img.save(buf, format="PNG", compress_level=1)
                 raw_bytes = buf.getvalue()
 
-            return base64.b64encode(raw_bytes).decode("utf-8")
+                if len(raw_bytes) > 750000:
+                    if img.mode in ("RGBA", "LA", "P"):
+                        img = img.convert("RGB")
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=92, optimize=True)
+                    raw_bytes = buf.getvalue()
+
+                return base64.b64encode(raw_bytes).decode("ascii"), raw_bytes
+        except Exception:
+            with open(img_path, "rb") as f:
+                raw_bytes = f.read()
+            return base64.b64encode(raw_bytes).decode("ascii"), raw_bytes
 
     def process_image(self, img_path: str) -> str:
         try:
-            img_b64 = self._prepare_image_b64(img_path)
+            img_b64, raw_bytes = self._prepare_image_data(img_path)
         except Exception as e:
             self.console.log(f"[red]Error preparing image '{img_path}': {e}[/red]")
             return ""
@@ -91,7 +95,7 @@ class BingOCR(OCREngine):
         # Step 1: Upload image to obtain insightsToken
         for attempt in range(max_retries):
             try:
-                mp = requests.CurlMime()
+                mp = CurlMime()
                 mp.addpart(name="imgurl", data="")
                 mp.addpart(name="cbir", data="sbi")
                 mp.addpart(name="imageBin", data=img_b64)
@@ -105,19 +109,19 @@ class BingOCR(OCREngine):
 
                 if r1.status_code == 302:
                     loc = r1.headers.get("Location", "")
-                    parsed = urlparse(loc)
-                    if parsed.netloc:
-                        api_host = parsed.netloc
-                    token_list = parse_qs(parsed.query).get("insightsToken")
-                    if token_list and token_list[0]:
-                        token = token_list[0]
+                    if "insightsToken=" in loc:
+                        token = loc.split("insightsToken=")[1].split("&")[0]
+                        parsed = urlparse(loc)
+                        if parsed.netloc:
+                            api_host = parsed.netloc
                         break
 
                 if attempt == max_retries - 1:
                     self.console.log(f"[yellow]Failed to get token for {img_path}, status: {r1.status_code}[/yellow]")
                     return ""
 
-                time.sleep(0.5 * (attempt + 1))
+                delay1 = 1.0 * (attempt + 1) if r1.status_code == 429 else 0.5 * (attempt + 1)
+                time.sleep(delay1)
             except Exception as e:
                 if attempt == max_retries - 1:
                     self.console.log(f"[yellow]Upload error for {img_path}: {e}[/yellow]")
@@ -145,7 +149,7 @@ class BingOCR(OCREngine):
         data = None
         for attempt in range(max_retries):
             try:
-                mp2 = requests.CurlMime()
+                mp2 = CurlMime()
                 mp2.addpart(
                     name="knowledgeRequest",
                     content_type="application/json",
@@ -167,7 +171,8 @@ class BingOCR(OCREngine):
                     self.console.log(f"[yellow]Failed knowledge request for {img_path}, status: {r2.status_code}[/yellow]")
                     return ""
 
-                time.sleep(0.5 * (attempt + 1))
+                delay2 = 1.0 * (attempt + 1) if r2.status_code == 429 else 0.5 * (attempt + 1)
+                time.sleep(delay2)
             except Exception as e:
                 if attempt == max_retries - 1:
                     self.console.log(f"[yellow]Knowledge API error for {img_path}: {e}[/yellow]")
@@ -194,8 +199,9 @@ class BingOCR(OCREngine):
         if self.detect_italic:
             try:
                 import cv2
+                import numpy as np
 
-                img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+                img_gray = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
             except Exception:
                 img_gray = None
 

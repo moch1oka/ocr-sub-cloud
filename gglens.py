@@ -3,7 +3,7 @@ import threading
 import time
 from typing import Any
 
-from curl_cffi import requests
+from curl_cffi import CurlHttpVersion, requests
 
 from engine import OCREngine, cluster_lines_by_y
 from lens import (
@@ -14,14 +14,6 @@ from lens import (
     LensOverlayServerResponse,
 )
 from utils import get_image_raw_bytes_and_dims
-
-try:
-    from curl_cffi import CurlHttpVersion
-except ImportError:
-    try:
-        from curl_cffi.curl import CurlHttpVersion
-    except ImportError:
-        from curl_cffi.requests import CurlHttpVersion
 
 _local_session = threading.local()
 
@@ -115,7 +107,8 @@ class GoogleLens(OCREngine):
                 if attempt == max_retries - 1:
                     self.console.log(f"[yellow]Failed to upload image {img_path} after {max_retries} attempts: {last_exception}[/yellow]")
                     return ""
-                time.sleep(0.5 * (attempt + 1))
+                delay = 1.0 * (attempt + 1) if res.status_code == 429 else 0.5 * (attempt + 1)
+                time.sleep(delay)
 
             except Exception as e:
                 last_exception = e
@@ -127,10 +120,14 @@ class GoogleLens(OCREngine):
         if res is None or res.status_code != 200:
             return ""
 
-        response_proto = LensOverlayServerResponse()
-        response_proto.ParseFromString(res.content)
-        paragraphs = response_proto.objects_response.text.text_layout.paragraphs
-        if not paragraphs:
+        try:
+            response_proto = LensOverlayServerResponse()
+            response_proto.ParseFromString(res.content)
+            paragraphs = response_proto.objects_response.text.text_layout.paragraphs
+            if not paragraphs:
+                return ""
+        except Exception as e:
+            self.console.log(f"[yellow]Protobuf parse error for {img_path}: {e}[/yellow]")
             return ""
 
         img_gray = None
