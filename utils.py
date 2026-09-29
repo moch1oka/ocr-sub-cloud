@@ -350,7 +350,7 @@ def create_ocr_engine(ocr_engine_type: OCREngineType, args) -> OCREngine:
 
     elif ocr_engine_type == OCREngineType.BING:
         from bing import BingOCR
-        threads = getattr(args, "bing_thread", 16)
+        threads = getattr(args, "bing_thread", 32)
         return BingOCR(
             threads=threads,
             line_break_mode=line_break_mode,

@@ -42,7 +42,7 @@ class GoogleLens(OCREngine):
 
     def __init__(
         self,
-        threads: int = 16,
+        threads: int = 32,
         line_break_mode: str = "y_cluster",
         lang: str = "vi",
         detect_italic: bool = False,
