@@ -1,11 +1,6 @@
 import random
-import threading
-import time
-from typing import Any
 
-from curl_cffi import CurlHttpVersion, requests
-
-from engine import OCREngine, cluster_lines_by_y
+from engine import OCREngine, check_italic_patch
 from lens import (
     AUTO_FILTER,
     PLATFORM_WEB,
@@ -14,17 +9,6 @@ from lens import (
     LensOverlayServerResponse,
 )
 from utils import get_image_raw_bytes_and_dims
-
-_local_session = threading.local()
-
-
-def _get_lens_session() -> requests.Session:
-    if not hasattr(_local_session, "session"):
-        _local_session.session = requests.Session(
-            impersonate="chrome",
-            http_version=CurlHttpVersion.V1_1,
-        )
-    return _local_session.session
 
 
 class GoogleLens(OCREngine):
@@ -39,15 +23,6 @@ class GoogleLens(OCREngine):
         "Sec-Fetch-Mode": "no-cors",
         "Sec-Fetch-Dest": "empty",
     }
-
-    def __init__(
-        self,
-        threads: int = 32,
-        line_break_mode: str = "y_cluster",
-        lang: str = "vi",
-        detect_italic: bool = False,
-    ):
-        super().__init__(threads=threads, line_break_mode=line_break_mode, lang=lang, detect_italic=detect_italic)
 
     @property
     def engine_name(self) -> str:
@@ -87,35 +62,13 @@ class GoogleLens(OCREngine):
 
         payload = request.SerializeToString()
 
-        session = _get_lens_session()
-        res = None
-        max_retries = 3
-        last_exception = None
-        for attempt in range(max_retries):
-            try:
-                res = session.post(
-                    self.LENS_ENDPOINT,
-                    data=payload,
-                    headers=self.HEADERS,
-                    timeout=30,
-                )
-
-                if res.status_code == 200:
-                    break
-
-                last_exception = Exception(f"Request failed with status code: {res.status_code}")
-                if attempt == max_retries - 1:
-                    self.console.log(f"[yellow]Failed to upload image {img_path} after {max_retries} attempts: {last_exception}[/yellow]")
-                    return ""
-                delay = 1.0 * (attempt + 1) if res.status_code == 429 else 0.5 * (attempt + 1)
-                time.sleep(delay)
-
-            except Exception as e:
-                last_exception = e
-                if attempt == max_retries - 1:
-                    self.console.log(f"[yellow]Failed to upload image {img_path} after {max_retries} attempts: {last_exception}[/yellow]")
-                    return ""
-                time.sleep(0.5 * (attempt + 1))
+        res = self.post_with_retry(
+            self.LENS_ENDPOINT,
+            data=payload,
+            headers=self.HEADERS,
+            timeout=30,
+            error_context=img_path,
+        )
 
         if res is None or res.status_code != 200:
             return ""
@@ -130,82 +83,38 @@ class GoogleLens(OCREngine):
             self.console.log(f"[yellow]Protobuf parse error for {img_path}: {e}[/yellow]")
             return ""
 
-        img_gray = None
-        if self.detect_italic:
-            try:
-                import cv2
-                import numpy as np
+        img_gray = self.decode_grayscale(raw_bytes)
 
-                img_gray = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
-            except Exception:
-                img_gray = None
-
-        def _is_line_italic(box) -> bool:
-            if img_gray is None:
-                return False
-            try:
-                from utils import is_italic_patch
-
-                cx = box.center_x if box.center_x is not None else 0.5
+        all_lines = []
+        para_texts = []
+        for p in paragraphs:
+            para_words = []
+            for l in p.lines:
+                box = l.geometry.bounding_box
                 cy = box.center_y if box.center_y is not None else 0.5
+                cx = box.center_x if box.center_x is not None else 0.5
                 bw = box.width if box.width is not None else 0.1
                 bh = box.height if box.height is not None else 0.1
 
-                pad_x = bw * 0.05
-                pad_y = bh * 0.05
-                x1 = int(max(0, (cx - bw / 2 - pad_x) * width))
-                x2 = int(min(width, (cx + bw / 2 + pad_x) * width))
-                y1 = int(max(0, (cy - bh / 2 - pad_y) * height))
-                y2 = int(min(height, (cy + bh / 2 + pad_y) * height))
+                line_str = "".join(
+                    (w.plain_text or "") + (w.text_separator or "")
+                    for w in l.words
+                ).strip()
+                if not line_str:
+                    continue
 
-                if x2 - x1 < 10 or y2 - y1 < 8:
-                    return False
+                para_words.append(line_str)
+                is_ita = False
+                if img_gray is not None:
+                    x1 = int(max(0, (cx - bw / 2) * width))
+                    x2 = int(min(width, (cx + bw / 2) * width))
+                    y1 = int(max(0, (cy - bh / 2) * height))
+                    y2 = int(min(height, (cy + bh / 2) * height))
+                    is_ita = check_italic_patch(img_gray, x1, y1, x2, y2)
 
-                return is_italic_patch(img_gray[y1:y2, x1:x2])
-            except Exception:
-                return False
+                all_lines.append({"text": line_str, "cy": cy, "cx": cx, "h": bh, "is_italic": is_ita})
 
-        if self.line_break_mode == "line":
-            lines_text = []
-            for p in paragraphs:
-                for l in p.lines:
-                    line_str = "".join(
-                        (w.plain_text or "") + (w.text_separator or "")
-                        for w in l.words
-                    ).strip()
-                    if line_str:
-                        if self.detect_italic and _is_line_italic(l.geometry.bounding_box):
-                            line_str = f"{{\\i1}}{line_str}{{\\i0}}"
-                        lines_text.append(line_str)
-            return "\n".join(lines_text)
+            if para_words:
+                para_texts.append(" ".join(para_words))
 
-        elif self.line_break_mode == "paragraph":
-            result = ""
-            separator = "\n"
-            for index, paragraph in enumerate(paragraphs):
-                if index > 0:
-                    result += separator
-                for line in paragraph.lines:
-                    for word in line.words:
-                        plain_text = word.plain_text or ""
-                        separator_text = word.text_separator or ""
-                        result += plain_text + separator_text
-            return result
-
-        else:  # default: "y_cluster"
-            all_lines = []
-            for p in paragraphs:
-                for l in p.lines:
-                    box = l.geometry.bounding_box
-                    cy = box.center_y if box.center_y is not None else 0.5
-                    cx = box.center_x if box.center_x is not None else 0.5
-                    h = box.height if box.height is not None else 0.1
-                    line_str = "".join(
-                        (w.plain_text or "") + (w.text_separator or "")
-                        for w in l.words
-                    ).strip()
-                    if line_str:
-                        is_ita = _is_line_italic(box) if self.detect_italic else False
-                        all_lines.append({"text": line_str, "cy": cy, "cx": cx, "h": h, "is_italic": is_ita})
-
-            return cluster_lines_by_y(all_lines)
+        return self.format_recognized_text(all_lines, para_texts)

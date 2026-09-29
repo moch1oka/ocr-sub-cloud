@@ -1,4 +1,14 @@
-from typing import override
+import sys
+
+if sys.version_info >= (3, 12):
+    from typing import override
+else:
+    try:
+        from typing_extensions import override
+    except ImportError:
+        def override(func):
+            return func
+
 
 
 def format_ass_timestamp(total_ms: int) -> str:

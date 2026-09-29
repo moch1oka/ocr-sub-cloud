@@ -30,11 +30,11 @@ def apply_punctuation_and_spacing(text: str) -> str:
     # Collapse multiple horizontal spaces
     text = re.sub(r"[ \t]{2,}", " ", text)
 
-    # Remove extra spaces before punctuation
-    text = re.sub(r"\s+([,.!?…])", r"\1", text)
+    # Remove extra spaces before punctuation (except dot followed by digit, e.g. .05)
+    text = re.sub(r"\s+([,!?:;…]|\.(?!\d))", r"\1", text)
 
     # Ensure single space after punctuation, except for multiple punctuation marks, numbers/decimals, and quotes/brackets/braces
-    text = re.sub(r"([,.!?…])(?!\s)(?![,.!?…])(?!\d)(?![)\"\'’”›»\]\}\{])", r"\1 ", text)
+    text = re.sub(r"([,.!?…;])(?!\s)(?![,.!?…;])(?!\d)(?![)\"\'’”›»\]\}\{])", r"\1 ", text)
 
     # Remove space between multiple punctuation marks
     text = re.sub(r"([,.!?…])\s+([,.!?…])", r"\1\2", text)
@@ -122,46 +122,68 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
 
 
 
-def get_image_raw_bytes_and_dims(image_path: str) -> tuple[bytes, int, int] | None:
-
+def get_image_raw_bytes_and_dims(
+    image_path: str,
+    min_dim: int = 50,
+    max_dim: int = 3000,
+    max_pixels: int = 3_000_000,
+    max_bytes: int = 750_000,
+) -> tuple[bytes, int, int] | None:
+    """
+    Loads, validates, and optionally resizes/re-encodes an image file.
+    Ensures dimensions and payload size satisfy both Google Lens and Bing OCR API constraints:
+    - min_dim >= 50px (prevents Bing 400 Bad Request on small text crops, improves OCR accuracy)
+    - max_dim <= 3000px and total pixels <= 3,000,000 (prevents oversized payload rejections)
+    - payload size <= 750KB (re-encodes as optimized JPEG if PNG is too large for Bing)
+    - fast path: reads directly from disk if already a valid PNG/JPEG within bounds
+    """
     try:
+        file_size = os.path.getsize(image_path)
         with Image.open(image_path) as img:
-            width, height = img.size
-            img_format = (img.format or "").upper()
-            max_pixels = 3_000_000
+            w, h = img.size
+            fmt = (img.format or "").upper()
 
-            # If image doesn't need downscaling and is already JPEG or PNG, read file directly
-            if width * height <= max_pixels and img_format in ("JPEG", "PNG"):
+            # Fast path: already valid format, within dimensions, and file size <= max_bytes
+            if (
+                min_dim <= w <= max_dim
+                and min_dim <= h <= max_dim
+                and w * h <= max_pixels
+                and file_size <= max_bytes
+                and fmt in ("JPEG", "PNG")
+            ):
                 with open(image_path, "rb") as f:
-                    return (f.read(), width, height)
+                    return (f.read(), w, h)
 
-            # Downscale if exceeding max_pixels
-            if width * height > max_pixels:
-                aspect_ratio = width / height
-                new_w = int(math.sqrt(max_pixels * aspect_ratio))
-                new_h = int(new_w / aspect_ratio)
-                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                width, height = img.size
-
-            image_bytes = io.BytesIO()
-            if img.mode in ("RGBA", "LA", "P"):
-                img.save(image_bytes, format="PNG", compress_level=1)
+            # Calculate scale if dimensions or pixel count exceed constraints
+            if w < min_dim or h < min_dim:
+                scale = max(min_dim / w, min_dim / h)
             else:
-                img.save(image_bytes, format="JPEG", quality=90)
-            return (image_bytes.getvalue(), width, height)
+                scale = min(1.0, max_dim / w, max_dim / h, math.sqrt(max_pixels / (w * h)))
 
-    except FileNotFoundError:
-        print(f"Error: Image file not found at '{image_path}'")
-        return None
-    except UnidentifiedImageError:
-        print(f"Error: Pillow (PIL) cannot identify '{image_path}' as an image. Cannot get dimensions.")
-        return None
-    except IOError as e:
-        print(f"Error reading raw file bytes from '{image_path}': {e}")
-        return None
-    except Exception as e:
-        # Add type hints to help static analysis if possible, but Exception is broad
-        print(f"An unexpected error occurred processing '{image_path}': {e}")
+            if scale != 1.0:
+                new_w = max(min_dim, int(round(w * scale)))
+                new_h = max(min_dim, int(round(h * scale)))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                w, h = img.size
+
+            buf = io.BytesIO()
+            if img.mode in ("RGBA", "LA", "P"):
+                img.save(buf, format="PNG", compress_level=1)
+            else:
+                img.save(buf, format="JPEG", quality=90)
+            raw_bytes = buf.getvalue()
+
+            # If payload still exceeds max_bytes, convert to RGB JPEG
+            if len(raw_bytes) > max_bytes:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=90, optimize=True)
+                raw_bytes = buf.getvalue()
+
+            return (raw_bytes, w, h)
+
+    except (FileNotFoundError, UnidentifiedImageError, IOError, Exception):
         return None
 
 

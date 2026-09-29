@@ -3,8 +3,11 @@ import concurrent.futures
 from enum import Enum
 from pathlib import Path
 from threading import Lock
+import threading
+import time
 from typing import Dict, List
 
+from curl_cffi import CurlHttpVersion, requests
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
@@ -83,6 +86,45 @@ def cluster_lines_by_y(lines: List[dict]) -> str:
     return "\n".join(row_strings)
 
 
+_local_session = threading.local()
+
+
+def decode_grayscale(raw_bytes: bytes):
+    """Decodes raw image bytes into a grayscale numpy array for computer vision processing."""
+    if not raw_bytes:
+        return None
+    try:
+        import cv2
+        import numpy as np
+
+        return cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+    except Exception:
+        return None
+
+
+def check_italic_patch(img_gray, x1: int, y1: int, x2: int, y2: int) -> bool:
+    """Checks if a bounding box crop inside a grayscale image contains italic text."""
+    if img_gray is None:
+        return False
+    try:
+        from utils import is_italic_patch
+
+        h_img, w_img = img_gray.shape[:2]
+        pad_x = (x2 - x1) * 0.05
+        pad_y = (y2 - y1) * 0.05
+        px1 = int(max(0, x1 - pad_x))
+        px2 = int(min(w_img, x2 + pad_x))
+        py1 = int(max(0, y1 - pad_y))
+        py2 = int(min(h_img, y2 + pad_y))
+
+        if px2 - px1 < 10 or py2 - py1 < 8:
+            return False
+
+        return is_italic_patch(img_gray[py1:py2, px1:px2])
+    except Exception:
+        return False
+
+
 class OCREngine(ABC):
     """Abstract base class for OCR engines implementing the Template Method pattern."""
 
@@ -100,6 +142,86 @@ class OCREngine(ABC):
         self.lang_cfg: LanguageConfig = get_language_config(lang)
         self.scan_lock = Lock()
         self.console = Console()
+
+    def get_session(self) -> requests.Session:
+        """Returns a thread-local curl_cffi session impersonating Chrome with HTTP/1.1."""
+        if not hasattr(_local_session, "session"):
+            _local_session.session = requests.Session(
+                impersonate="chrome",
+                http_version=CurlHttpVersion.V1_1,
+            )
+        return _local_session.session
+
+    def post_with_retry(
+        self,
+        url: str,
+        session: requests.Session | None = None,
+        max_retries: int = 3,
+        success_codes: tuple[int, ...] = (200,),
+        error_context: str = "",
+        **kwargs,
+    ) -> requests.Response | None:
+        """Executes a POST request with exponential backoff on errors and HTTP 429 rate limits."""
+        sess = session or self.get_session()
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                res = sess.post(url, **kwargs)
+                if res.status_code in success_codes:
+                    return res
+
+                last_exception = Exception(f"Request failed with status code: {res.status_code}")
+                if attempt == max_retries - 1:
+                    ctx = f" for {error_context}" if error_context else ""
+                    self.console.log(f"[yellow]Failed request{ctx} after {max_retries} attempts: {last_exception}[/yellow]")
+                    return None
+
+                delay = 1.0 * (attempt + 1) if res.status_code == 429 else 0.5 * (attempt + 1)
+                time.sleep(delay)
+            except Exception as e:
+                last_exception = e
+                if attempt == max_retries - 1:
+                    ctx = f" for {error_context}" if error_context else ""
+                    self.console.log(f"[yellow]Request error{ctx} after {max_retries} attempts: {last_exception}[/yellow]")
+                    return None
+                time.sleep(0.5 * (attempt + 1))
+        return None
+
+    def decode_grayscale(self, raw_bytes: bytes):
+        """Decodes raw image bytes into a grayscale numpy array if italic detection is active."""
+        if not self.detect_italic or not raw_bytes:
+            return None
+        return decode_grayscale(raw_bytes)
+
+    def format_recognized_text(
+        self,
+        lines: list[dict],
+        paragraphs: list[str] | None = None,
+    ) -> str:
+        """
+        Formats recognized lines according to self.line_break_mode:
+        - 'line': one line per recognized line (wrapped in {\\i1} if italic)
+        - 'paragraph': joined by paragraphs
+        - 'y_cluster': clustered into visual rows based on normalized Y coordinates
+        """
+        if not lines:
+            return ""
+
+        if self.line_break_mode == "line":
+            formatted = []
+            for l in lines:
+                txt = l.get("text", "").strip()
+                if txt:
+                    if l.get("is_italic"):
+                        txt = f"{{\\i1}}{txt}{{\\i0}}"
+                    formatted.append(txt)
+            return "\n".join(formatted)
+
+        elif self.line_break_mode == "paragraph" and paragraphs is not None:
+            return "\n".join(p for p in paragraphs if p.strip())
+
+        else:  # default: "y_cluster"
+            return cluster_lines_by_y(lines)
 
     @property
     @abstractmethod
