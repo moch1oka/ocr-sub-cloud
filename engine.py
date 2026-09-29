@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+import argparse
 import concurrent.futures
 from enum import Enum
 from pathlib import Path
 from threading import Lock
 import threading
 import time
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from curl_cffi import CurlHttpVersion, requests
 from rich.console import Console
@@ -15,6 +18,94 @@ from languages import LanguageConfig, get_language_config
 from progress import ImageSecondSpeedColumn
 from utils import collect_images, timecode_key
 
+
+# ==========================================
+# 1. COMPUTER VISION & ITALIC DETECTION
+# ==========================================
+
+def decode_grayscale(raw_bytes: bytes):
+    """Decodes raw image bytes into a grayscale numpy array for computer vision processing."""
+    if not raw_bytes:
+        return None
+    try:
+        import cv2
+        import numpy as np
+
+        return cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+    except Exception:
+        return None
+
+
+def is_italic_patch(gray_patch, threshold_angle: float = 8.0) -> bool:
+    """
+    Detects whether a cropped grayscale image patch containing text is italic
+    by measuring vertical projection profile variance under affine shear angles.
+    """
+    if gray_patch is None or not hasattr(gray_patch, "shape"):
+        return False
+    h, w = gray_patch.shape[:2]
+    if h < 8 or w < 12:
+        return False
+
+    try:
+        import cv2
+        import numpy as np
+
+        _, thresh = cv2.threshold(gray_patch, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        border_mean = (thresh[0, :].mean() + thresh[-1, :].mean() + thresh[:, 0].mean() + thresh[:, -1].mean()) / 4.0
+        if border_mean > 127:
+            thresh = cv2.bitwise_not(thresh)
+
+        if np.count_nonzero(thresh) < 20:
+            return False
+
+        # Test shear angles in degrees (-4 to 20)
+        angles = [-4, 0, 4, 8, 11, 14, 17, 20]
+        variances = []
+        for angle in angles:
+            rad = np.radians(angle)
+            tan_a = float(np.tan(rad))
+            new_w = w + int(h * abs(tan_a))
+            offset_x = 0.0 if tan_a >= 0 else float(int(h * abs(tan_a)))
+            M = np.float32([[1, tan_a, offset_x], [0, 1, 0]])
+            sheared = cv2.warpAffine(thresh, M, (new_w, h), flags=cv2.INTER_NEAREST)
+            proj = np.sum(sheared, axis=0)
+            variances.append(float(np.var(proj)))
+
+        best_idx = int(np.argmax(variances))
+        best_angle = angles[best_idx]
+        var_0 = variances[1]  # angle 0
+        var_best = variances[best_idx]
+
+        return bool((best_angle >= threshold_angle) and (var_best > var_0 * 1.05))
+    except Exception:
+        return False
+
+
+def check_italic_patch(img_gray, x1: int, y1: int, x2: int, y2: int) -> bool:
+    """Checks if a bounding box crop inside a grayscale image contains italic text."""
+    if img_gray is None:
+        return False
+    try:
+        h_img, w_img = img_gray.shape[:2]
+        pad_x = (x2 - x1) * 0.05
+        pad_y = (y2 - y1) * 0.05
+        px1 = int(max(0, x1 - pad_x))
+        px2 = int(min(w_img, x2 + pad_x))
+        py1 = int(max(0, y1 - pad_y))
+        py2 = int(min(h_img, y2 + pad_y))
+
+        if px2 - px1 < 10 or py2 - py1 < 8:
+            return False
+
+        return is_italic_patch(img_gray[py1:py2, px1:px2])
+    except Exception:
+        return False
+
+
+# ==========================================
+# 2. SPATIAL Y-COORDINATE LINE CLUSTERING
+# ==========================================
 
 def format_cluster_row(cluster: list[dict]) -> str:
     """Formats a visual row, wrapping italic text in {\\i1}...{\\i0} tags if present."""
@@ -86,43 +177,11 @@ def cluster_lines_by_y(lines: List[dict]) -> str:
     return "\n".join(row_strings)
 
 
+# ==========================================
+# 3. BASE OCR ENGINE CLASS
+# ==========================================
+
 _local_session = threading.local()
-
-
-def decode_grayscale(raw_bytes: bytes):
-    """Decodes raw image bytes into a grayscale numpy array for computer vision processing."""
-    if not raw_bytes:
-        return None
-    try:
-        import cv2
-        import numpy as np
-
-        return cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
-    except Exception:
-        return None
-
-
-def check_italic_patch(img_gray, x1: int, y1: int, x2: int, y2: int) -> bool:
-    """Checks if a bounding box crop inside a grayscale image contains italic text."""
-    if img_gray is None:
-        return False
-    try:
-        from utils import is_italic_patch
-
-        h_img, w_img = img_gray.shape[:2]
-        pad_x = (x2 - x1) * 0.05
-        pad_y = (y2 - y1) * 0.05
-        px1 = int(max(0, x1 - pad_x))
-        px2 = int(min(w_img, x2 + pad_x))
-        py1 = int(max(0, y1 - pad_y))
-        py2 = int(min(h_img, y2 + pad_y))
-
-        if px2 - px1 < 10 or py2 - py1 < 8:
-            return False
-
-        return is_italic_patch(img_gray[py1:py2, px1:px2])
-    except Exception:
-        return False
 
 
 class OCREngine(ABC):
@@ -280,6 +339,10 @@ class OCREngine(ABC):
         return dict(sorted(results.items(), key=timecode_key))
 
 
+# ==========================================
+# 4. ENGINE ENUMS & FACTORY PATTERN
+# ==========================================
+
 class OCREngineType(Enum):
     GGLENS = "gglens"
     BING = "bing"
@@ -291,3 +354,43 @@ class OCREngineType(Enum):
             if engine.value.lower().replace("_", "").replace("-", "") == clean_value:
                 return engine
         raise ValueError(f"Unknown OCR engine: {value}. Available: {[e.value for e in cls]}")
+
+
+def ocr_engine_type(value: str) -> OCREngineType:
+    """ArgumentParser type converter for OCREngineType."""
+    try:
+        return OCREngineType.from_string(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
+def create_ocr_engine(ocr_engine_type: OCREngineType, args: Any) -> OCREngine:
+    """Factory function to instantiate the requested OCR engine with CLI parameters."""
+    line_break_mode = getattr(args, "line_break_mode", "y_cluster")
+    lang = getattr(args, "lang", "vi")
+    detect_italic = getattr(args, "detect_italic", False)
+
+    if ocr_engine_type == OCREngineType.GGLENS:
+        from gglens import GoogleLens
+
+        threads = getattr(args, "gglens_thread", 32)
+        return GoogleLens(
+            threads=threads,
+            line_break_mode=line_break_mode,
+            lang=lang,
+            detect_italic=detect_italic,
+        )
+
+    elif ocr_engine_type == OCREngineType.BING:
+        from bing import BingOCR
+
+        threads = getattr(args, "bing_thread", 32)
+        return BingOCR(
+            threads=threads,
+            line_break_mode=line_break_mode,
+            lang=lang,
+            detect_italic=detect_italic,
+        )
+
+    else:
+        raise ValueError(f"Unknown OCR engine: {ocr_engine_type}")

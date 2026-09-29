@@ -3,10 +3,10 @@ from argparse import BooleanOptionalAction
 from pathlib import Path
 
 from dvdsub import DvdSupParser, VobSubParser, detect_sup_type, save_dvd_images
-from engine import OCREngine, OCREngineType
+from engine import OCREngine, OCREngineType, create_ocr_engine, ocr_engine_type
 from ocr import OCR_Subtitles
 from pgs import PgsParser, save_pgs_images
-from utils import create_ocr_engine, float_range, ocr_engine_type
+from utils import float_range
 from vsf import VideoSubFinder
 
 

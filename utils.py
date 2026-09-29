@@ -8,14 +8,16 @@ import platform
 import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List
+from typing import Callable, List
 
 from PIL import Image, UnidentifiedImageError
 
-if TYPE_CHECKING:
-    from engine import OCREngine, OCREngineType
-
 from languages import get_language_config
+
+
+# ==========================================
+# 1. TEXT CLEANUP & PUNCTUATION FORMATTING
+# ==========================================
 
 DOUBLE_QUOTE_REGEX = re.compile(
     "|".join(["«", "‹", "»", "›", "„", "“", "‟", "”", "❝", "❞", "❮", "❯", "〝", "〞", "〟", "＂"])
@@ -27,6 +29,7 @@ CJK_CHAR_REGEX = r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
 
 
 def apply_punctuation_and_spacing(text: str) -> str:
+    """Collapses multiple spaces and normalizes spacing around punctuation marks."""
     # Collapse multiple horizontal spaces
     text = re.sub(r"[ \t]{2,}", " ", text)
 
@@ -47,12 +50,18 @@ def apply_punctuation_and_spacing(text: str) -> str:
 
 
 def fix_quotes(text: str) -> str:
+    """Normalizes various Unicode quotes into standard ASCII quotes."""
     text = SINGLE_QUOTE_REGEX.sub("'", text)
     text = DOUBLE_QUOTE_REGEX.sub('"', text)
     return text
 
 
 def text_cleanup(text: str, lang: str = "vi") -> str:
+    """
+    Cleans up raw OCR output according to the selected language preset.
+    Preserves newlines as '\\N', normalizes quotes, applies language-specific whitelisting,
+    and strips unwanted spaces for CJK scripts.
+    """
     if text is None:
         return ""
 
@@ -121,6 +130,9 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
     return text.strip()
 
 
+# ==========================================
+# 2. IMAGE PREPROCESSING & RESIZING
+# ==========================================
 
 def get_image_raw_bytes_and_dims(
     image_path: str,
@@ -187,69 +199,10 @@ def get_image_raw_bytes_and_dims(
         return None
 
 
-def float_range(mini: float, maxi: float) -> Callable[..., float]:
-    """Return function handle of an argument type function for
-    ArgumentParser checking a float range: mini <= arg <= maxi
-      mini - minimum acceptable argument
-      maxi - maximum acceptable argument"""
+# ==========================================
+# 3. TIMECODE & FILENAME PARSING
+# ==========================================
 
-    # Define the function with default arguments
-    def float_range_checker(arg):
-        """New Type function for argparse - a float within predefined range."""
-
-        try:
-            f = float(arg)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError("must be a floating point number") from exc
-
-        if f < mini or f > maxi:
-            raise argparse.ArgumentTypeError("must be in range [" + str(mini) + " .. " + str(maxi) + "]")
-        return f
-
-    # Return function handle to checking function
-    return float_range_checker
-
-
-def ocr_engine_type(value: str):
-    from engine import OCREngineType
-
-    try:
-        return OCREngineType.from_string(value)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
-
-def get_in_path(name: str) -> str | None:
-    search_name = name
-    if platform.system() == "Windows":
-        search_name = name + ".exe"
-
-    try:
-        path = shutil.which(search_name)
-        # Scoop
-        if platform.system() == "Windows":
-            shim_path = shutil.which(f"{name}.shim")
-            if shim_path:
-                scoop_app_path = Path(shim_path).parents[1] / "apps" / "videosubfinder" / "current" / "VideoSubFinderWXW.exe"
-                if scoop_app_path.is_file():
-                    path = str(scoop_app_path)
-        if path and os.access(path, os.X_OK):
-            return path
-        else:
-            return None
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
-
-def collect_images(images_dir: Path | str) -> List[Path]:
-    """Collect all image files from directory."""
-    images_dir = Path(images_dir)
-    valid_suffixes = {".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"}
-    images = [
-        p for p in images_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in valid_suffixes
-    ]
-    return sorted(images)
-    
 def parse_filename_timecodes(filename: str | Path) -> tuple[int, int, bool]:
     """
     Extracts start_ms, end_ms, and is_top flag directly from VideoSubFinder image filename.
@@ -280,7 +233,8 @@ def parse_filename_timecodes(filename: str | Path) -> tuple[int, int, bool]:
     return start_ms, end_ms, is_top
 
 
-def timecode_key(item):
+def timecode_key(item) -> tuple[int, int, int, int]:
+    """Sorting key for images based on starting timecode extracted from filename."""
     if isinstance(item, tuple):
         filename = str(item[0])
     elif isinstance(item, (Path, str)):
@@ -289,96 +243,80 @@ def timecode_key(item):
         filename = str(item)
     filename = Path(filename).name
     try:
-        name_without_ext = filename.rsplit('.', 1)[0]
-        
-        if name_without_ext.startswith(('bot_', 'top_')):
-            timecode_part = '_'.join(name_without_ext.split('_')[1:])
+        name_without_ext = filename.rsplit(".", 1)[0]
+
+        if name_without_ext.startswith(("bot_", "top_")):
+            timecode_part = "_".join(name_without_ext.split("_")[1:])
         else:
             timecode_part = name_without_ext
-        
-        start_timecode = timecode_part.split('__')[0]
-        parts = start_timecode.split('_')
-        
+
+        start_timecode = timecode_part.split("__")[0]
+        parts = start_timecode.split("_")
+
         hour = int(parts[0])
         minute = int(parts[1])
         second = int(parts[2])
         frac = parts[3]
         ms = int(frac) * 10 if len(frac) == 2 else int(frac)
-        
+
         return (hour, minute, second, ms)
     except (IndexError, ValueError):
         return (99, 99, 99, 999999)
 
-def is_italic_patch(gray_patch, threshold_angle: float = 8.0) -> bool:
-    """
-    Detects whether a cropped grayscale image patch containing text is italic
-    by measuring vertical projection profile variance under affine shear angles.
-    """
-    if gray_patch is None or not hasattr(gray_patch, "shape"):
-        return False
-    h, w = gray_patch.shape[:2]
-    if h < 8 or w < 12:
-        return False
+
+# ==========================================
+# 4. SYSTEM & CLI UTILITIES
+# ==========================================
+
+def get_in_path(name: str) -> str | None:
+    """Finds executable in system PATH or Scoop shims."""
+    search_name = name
+    if platform.system() == "Windows":
+        search_name = name + ".exe"
 
     try:
-        import cv2
-        import numpy as np
-
-        _, thresh = cv2.threshold(gray_patch, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        border_mean = (thresh[0, :].mean() + thresh[-1, :].mean() + thresh[:, 0].mean() + thresh[:, -1].mean()) / 4.0
-        if border_mean > 127:
-            thresh = cv2.bitwise_not(thresh)
-
-        if np.count_nonzero(thresh) < 20:
-            return False
-
-        # Test shear angles in degrees (-4 to 20)
-        angles = [-4, 0, 4, 8, 11, 14, 17, 20]
-        variances = []
-        for angle in angles:
-            rad = np.radians(angle)
-            tan_a = float(np.tan(rad))
-            new_w = w + int(h * abs(tan_a))
-            offset_x = 0.0 if tan_a >= 0 else float(int(h * abs(tan_a)))
-            M = np.float32([[1, tan_a, offset_x], [0, 1, 0]])
-            sheared = cv2.warpAffine(thresh, M, (new_w, h), flags=cv2.INTER_NEAREST)
-            proj = np.sum(sheared, axis=0)
-            variances.append(float(np.var(proj)))
-
-        best_idx = int(np.argmax(variances))
-        best_angle = angles[best_idx]
-        var_0 = variances[1]  # angle 0
-        var_best = variances[best_idx]
-
-        return bool((best_angle >= threshold_angle) and (var_best > var_0 * 1.05))
+        path = shutil.which(search_name)
+        # Scoop support on Windows
+        if platform.system() == "Windows":
+            shim_path = shutil.which(f"{name}.shim")
+            if shim_path:
+                scoop_app_path = (
+                    Path(shim_path).parents[1]
+                    / "apps"
+                    / "videosubfinder"
+                    / "current"
+                    / "VideoSubFinderWXW.exe"
+                )
+                if scoop_app_path.is_file():
+                    path = str(scoop_app_path)
+        if path and os.access(path, os.X_OK):
+            return path
+        return None
     except Exception:
-        return False
+        return None
 
 
-def create_ocr_engine(ocr_engine_type: OCREngineType, args) -> OCREngine:
-    from engine import OCREngineType
-    line_break_mode = getattr(args, "line_break_mode", "y_cluster")
-    lang = getattr(args, "lang", "vi")
-    detect_italic = getattr(args, "detect_italic", False)
+def collect_images(images_dir: Path | str) -> List[Path]:
+    """Collects and returns all supported image files from a directory."""
+    images_dir = Path(images_dir)
+    valid_suffixes = {".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"}
+    images = [
+        p for p in images_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in valid_suffixes
+    ]
+    return sorted(images)
 
-    if ocr_engine_type == OCREngineType.GGLENS:
-        from gglens import GoogleLens
-        return GoogleLens(
-            threads=args.gglens_thread,
-            line_break_mode=line_break_mode,
-            lang=lang,
-            detect_italic=detect_italic,
-        )
 
-    elif ocr_engine_type == OCREngineType.BING:
-        from bing import BingOCR
-        threads = getattr(args, "bing_thread", 32)
-        return BingOCR(
-            threads=threads,
-            line_break_mode=line_break_mode,
-            lang=lang,
-            detect_italic=detect_italic,
-        )
+def float_range(mini: float, maxi: float) -> Callable[..., float]:
+    """Returns an ArgumentParser type function checking that mini <= value <= maxi."""
+    def float_range_checker(arg):
+        try:
+            f = float(arg)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a floating point number") from exc
 
-    else:
-        raise ValueError(f"Unknown OCR engine: {ocr_engine_type}")
+        if f < mini or f > maxi:
+            raise argparse.ArgumentTypeError(f"must be in range [{mini} .. {maxi}]")
+        return f
+
+    return float_range_checker
