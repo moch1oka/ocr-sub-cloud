@@ -10,6 +10,20 @@ from utils import float_range
 from vsf import VideoSubFinder
 
 
+# ==============================================================================
+# DEFAULT SETTINGS (TÙY CHỈNH MẶC ĐỊNH TẠI ĐÂY)
+# ==============================================================================
+DEFAULT_OCR_ENGINE = OCREngineType.GGLENS  # OCREngineType.GGLENS hoặc OCREngineType.BING
+DEFAULT_GGLENS_THREAD = 32                 # Số luồng Google Lens (khuyên dùng: 32 - 80)
+DEFAULT_BING_THREAD = 32                   # Số luồng Bing OCR (khuyên dùng: 16 - 48)
+DEFAULT_LANG = "vi"                        # "vi", "en", "ja", "zh"
+DEFAULT_FORMAT = "ass"                     # "ass", "srt", "both"
+DEFAULT_LINE_BREAK_MODE = "y_cluster"      # "y_cluster", "line", "paragraph"
+DEFAULT_DETECT_ITALIC = False              # True để bật nhận diện chữ nghiêng
+DEFAULT_OUTPUT_DIR = "outputs"             # Thư mục lưu phụ đề xuất ra
+# ==============================================================================
+
+
 def create_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A tool to OCR subtitles from video files, Blu-ray PGS (.sup), DVD-SUP (.sup), DVD VobSub (.sub/.idx), or extracted images using VideoSubFinder, Google Lens, and Bing OCR."
@@ -18,8 +32,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "-o",
         "--output_dir",
         type=str,
-        default="outputs",
-        help="The path to output directory. Default: outputs",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"The path to output directory. Default: {DEFAULT_OUTPUT_DIR}",
     )
 
     parser.add_argument(
@@ -87,8 +101,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--format",
         type=str,
         choices=["ass", "srt", "both"],
-        default="ass",
-        help="Subtitle output format. Choices: ['ass', 'srt', 'both']. Default: ass",
+        default=DEFAULT_FORMAT,
+        help=f"Subtitle output format. Choices: ['ass', 'srt', 'both']. Default: {DEFAULT_FORMAT}",
     )
 
     parser.add_argument(
@@ -96,8 +110,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--lang",
         type=str,
         choices=["vi", "en", "ja", "zh"],
-        default="vi",
-        help="Language preset for OCR engine, text cleanup, font, and subtitle merging. Choices: ['vi', 'en', 'ja', 'zh']. Default: vi",
+        default=DEFAULT_LANG,
+        help=f"Language preset for OCR engine, text cleanup, font, and subtitle merging. Choices: ['vi', 'en', 'ja', 'zh']. Default: {DEFAULT_LANG}",
     )
 
     parser.add_argument(
@@ -112,37 +126,37 @@ def create_arg_parser() -> argparse.ArgumentParser:
     ocr_group.add_argument(
         "--ocr_engine",
         type=ocr_engine_type,
-        default=OCREngineType.GGLENS,
-        help=f"Select OCR engine. Choices: {[e.value for e in OCREngineType]}. Default: {OCREngineType.GGLENS.value}",
+        default=DEFAULT_OCR_ENGINE,
+        help=f"Select OCR engine. Choices: {[e.value for e in OCREngineType]}. Default: {DEFAULT_OCR_ENGINE.value}",
     )
 
     # Google Lens settings
     ocr_group.add_argument(
         "--gglens_thread",
         type=int,
-        default=32,
-        help="Google Lens OCR threads (e.g. 32-80 threads for 20-30 img/s). Default: 32",
+        default=DEFAULT_GGLENS_THREAD,
+        help=f"Google Lens OCR threads (e.g. 32-80 threads for 20-30 img/s). Default: {DEFAULT_GGLENS_THREAD}",
     )
     # Bing OCR settings
     ocr_group.add_argument(
         "--bing_thread",
         type=int,
-        default=32,
-        help="Bing OCR threads. Default: 32",
+        default=DEFAULT_BING_THREAD,
+        help=f"Bing OCR threads. Default: {DEFAULT_BING_THREAD}",
     )
 
     ocr_group.add_argument(
         "--line_break_mode",
         type=str,
         choices=["y_cluster", "line", "paragraph"],
-        default="y_cluster",
-        help="Line break detection mode: 'y_cluster' (smart Y-coordinate clustering, recommended), 'line' (break on every line), 'paragraph' (break only on paragraphs). Default: y_cluster",
+        default=DEFAULT_LINE_BREAK_MODE,
+        help=f"Line break detection mode: 'y_cluster' (smart Y-coordinate clustering, recommended), 'line' (break on every line), 'paragraph' (break only on paragraphs). Default: {DEFAULT_LINE_BREAK_MODE}",
     )
     ocr_group.add_argument(
         "--detect_italic",
         action=BooleanOptionalAction,
-        default=False,
-        help="Enable local detection and preservation of italic text (e.g. {\\i1} in ASS, <i> in SRT). Default: False",
+        default=DEFAULT_DETECT_ITALIC,
+        help=f"Enable local detection and preservation of italic text (e.g. {{\\i1}} in ASS, <i> in SRT). Default: {DEFAULT_DETECT_ITALIC}",
     )
 
     vsf_param_group = parser.add_argument_group(title="VideoSubFinder")
