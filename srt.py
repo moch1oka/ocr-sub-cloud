@@ -32,34 +32,3 @@ def format_srt_block(start_ms: int, end_ms: int, text_content: str, index: int, 
     if is_top:
         text = f"{{\\an8}}{text}"
     return f"{index}\n{start_ts} --> {end_ts}\n{text}\n\n"
-
-
-class SrtSubtitle:
-    """Represents a single SubRip (SRT) subtitle entry with millisecond precision."""
-
-    def __init__(self, start_ms: int, end_ms: int, text_content: str, is_top: bool = False):
-        self.start_ms: int = start_ms
-        self.end_ms: int = end_ms
-        self.text_content: str = text_content
-        self.is_top: bool = is_top
-
-    @property
-    def start_time(self) -> str:
-        return format_srt_timestamp(self.start_ms)
-
-    @property
-    def end_time(self) -> str:
-        return format_srt_timestamp(self.end_ms)
-
-    def format(self, index: int) -> str:
-        """
-        Formats the subtitle into an SRT block.
-        Top subtitles are prefixed with standard {\\an8}.
-        """
-        text = ass_to_srt_text(self.text_content)
-        if self.is_top:
-            text = f"{{\\an8}}{text}"
-        return f"{index}\n{self.start_time} --> {self.end_time}\n{text}\n\n"
-
-    def __str__(self) -> str:
-        return self.format(1)

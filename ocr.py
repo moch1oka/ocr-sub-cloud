@@ -109,8 +109,10 @@ class OCR_Subtitles:
         subtitle_format: str = "ass",
         lang: str = "vi",
         font: str | None = None,
+        use_cache: bool = True,
     ) -> None:
         self.sub_items: dict[str, SubtitleItem] = {}
+        self.empty_images: list[str] = []
         self.ocr_engine = ocr_engine
         self.subtitle_format = subtitle_format.lower()
         self.lang = lang
@@ -120,9 +122,10 @@ class OCR_Subtitles:
         self.images_dir, self.output_files = self._process_file(
             output_subtitles_name, output_directory, images_dir_override
         )
+        self.cache_path = Path(output_directory).resolve() / ".ocr_cache.json" if use_cache else None
 
     def __call__(self):
-        results = self.ocr_engine(self.images_dir)
+        results = self.ocr_engine(self.images_dir, cache_path=self.cache_path)
 
         if not results:
             warnings.warn("No images processed or no text extracted.")
@@ -135,6 +138,23 @@ class OCR_Subtitles:
 
         for fmt, path in self.output_files.items():
             print(f"Saved {fmt.upper()} subtitle to {path}")
+
+        self._report_empty_images()
+
+    def _report_empty_images(self, show: int = 10) -> None:
+        """Lists images that produced no text, so they can be checked by hand (or OCRed again)."""
+        if not self.empty_images:
+            return
+        subtitle_path = next(iter(self.output_files.values()))
+        report_path = subtitle_path.with_name(f"{subtitle_path.stem}_no_text.txt")
+        report_path.write_text(
+            "".join(f"{self.images_dir / name}\n" for name in self.empty_images), encoding="utf-8"
+        )
+        print(f"{len(self.empty_images)} image(s) gave no text (not in the subtitles), listed in {report_path}:")
+        for name in self.empty_images[:show]:
+            print(f"  {name}")
+        if len(self.empty_images) > show:
+            print(f"  ... and {len(self.empty_images) - show} more")
 
     def _process_file(
         self,
@@ -149,7 +169,6 @@ class OCR_Subtitles:
             else:
                 images_dir_path = (Path.cwd() / "images").resolve()
 
-            images_dir_path.mkdir(parents=True, exist_ok=True)
             output_path.mkdir(parents=True, exist_ok=True)
 
             # Sanitize output name to prevent extension doubling like name.ass.ass
@@ -189,6 +208,8 @@ class OCR_Subtitles:
             text = ""
 
         text = text_cleanup(text, lang=self.lang)
+        if not text.strip():
+            self.empty_images.append(img_name)
 
         try:
             start_ms, end_ms, is_top = parse_filename_timecodes(img_name)
@@ -272,6 +293,3 @@ class OCR_Subtitles:
             print(f"Error writing subtitle output: {e}")
             raise
 
-
-# Alias for PEP 8 naming compliance
-OCRSubtitles = OCR_Subtitles

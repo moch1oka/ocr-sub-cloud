@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
+import json
 import math
 import os
 import platform
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Callable, List
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from languages import get_language_config
 
@@ -28,6 +31,11 @@ SINGLE_QUOTE_REGEX = re.compile("|".join(["‘", "‛", "’", "❛", "❜", "`"
 CJK_CHAR_REGEX = r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
 
 
+def _space_after_sentence_dot(m: re.Match) -> str:
+    next_char = m.string[m.end()]
+    return ". " if next_char.isupper() else "."
+
+
 def apply_punctuation_and_spacing(text: str) -> str:
     """Collapses multiple spaces and normalizes spacing around punctuation marks."""
     # Collapse multiple horizontal spaces
@@ -37,7 +45,11 @@ def apply_punctuation_and_spacing(text: str) -> str:
     text = re.sub(r"\s+([,!?:;…]|\.(?!\d))", r"\1", text)
 
     # Ensure single space after punctuation, except for multiple punctuation marks, numbers/decimals, and quotes/brackets/braces
-    text = re.sub(r"([,.!?…;])(?!\s)(?![,.!?…;])(?!\d)(?![)\"\'’”›»\]\}\{])", r"\1 ", text)
+    text = re.sub(r"([,!?…;])(?!\s)(?![,.!?…;])(?!\d)(?![)\"\'’”›»\]\}\{])", r"\1 ", text)
+
+    # A dot only gets a space when it ends a word and the next word is capitalized ("Hello.World"),
+    # so URLs, abbreviations and initials (www.google.com, e.g., U.S.A) stay intact
+    text = re.sub(r"(?<=[^\W\d_]{2})\.(?=[^\W\d_])", _space_after_sentence_dot, text)
 
     # Remove space between multiple punctuation marks
     text = re.sub(r"([,.!?…])\s+([,.!?…])", r"\1\2", text)
@@ -76,8 +88,16 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
         text = SINGLE_QUOTE_REGEX.sub("'", text)
         text = re.sub(r'[“”]', '"', text)
 
+        # Ellipses come back as '･･･', '...' or a mix (Lens sometimes returns '･･･ ...' for one '…')
+        text = re.sub(r"[･.]{2,}…?", "…", text)
+        text = re.sub(r"…(?:\s+…)+", "…", text)
+        text = text.replace("･", "・")
+
         # Remove OCR-generated spaces between CJK characters and around CJK punctuation
         if cfg.strip_cjk_spaces:
+            # Space before ASCII !/? or after a closing bracket, next to CJK text ("はは !", "(頭目) 待て")
+            text = re.sub(rf"({CJK_CHAR_REGEX})\s+([!?])", r"\1\2", text)
+            text = re.sub(rf"([)\]])\s+({CJK_CHAR_REGEX})", r"\1\2", text)
             # Remove space before CJK closing/middle punctuation
             text = re.sub(r"\s+([、。，！？：；）》」』】…〜])", r"\1", text)
             # Remove space after CJK opening/middle punctuation
@@ -97,7 +117,7 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
             r"\u4E00-\u9FFF"  # CJK Unified Ideographs
             r"\uF900-\uFAFF"  # CJK Compatibility
             r"\uFF00-\uFFEF"  # Halfwidth & Fullwidth Forms
-            r"!\[\]_\$ /\\:\'\" ,.\?;\-+=()*%@~…{}"
+            r"!\[\]_\$ /\\:\'\" ,.\?;\-+=()*%@~…{}&#<>♪♫"
             r"]"
         )
         text = re.sub(pattern, "", text)
@@ -107,7 +127,7 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
         text = fix_quotes(text)
 
         # Preserve apostrophes/single quotes, semicolons, ellipses, braces, and common punctuation
-        allowed_special_chars = r' ![]_{}$ /\\:\'" ,.?;\-+=()*%@~…'
+        allowed_special_chars = r' ![]_{}$ /\\:\'" ,.?;\-+=()*%@~…&#<>♪♫'
         pattern = re.compile(
             rf"[^\sa-zA-Z"
             r"\u00C0-\u017F"  # Latin Extended-A
@@ -170,12 +190,21 @@ def get_image_raw_bytes_and_dims(
             if w < min_dim or h < min_dim:
                 scale = max(min_dim / w, min_dim / h)
             else:
-                scale = min(1.0, max_dim / w, max_dim / h, math.sqrt(max_pixels / (w * h)))
+                scale = 1.0
+            # Never upscale past the max limits (very wide, very short strips)
+            scale = min(scale, max_dim / w, max_dim / h, math.sqrt(max_pixels / (w * h)))
 
             if scale != 1.0:
-                new_w = max(min_dim, int(round(w * scale)))
-                new_h = max(min_dim, int(round(h * scale)))
+                new_w = min(max_dim, max(1, int(round(w * scale))))
+                new_h = min(max_dim, max(1, int(round(h * scale))))
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                w, h = img.size
+
+            # Pad (instead of stretching) whatever is still below min_dim
+            if w < min_dim or h < min_dim:
+                pad_w, pad_h = max(0, min_dim - w), max(0, min_dim - h)
+                border = (pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2)
+                img = ImageOps.expand(img, border=border, fill=img.getpixel((0, 0)))
                 w, h = img.size
 
             buf = io.BytesIO()
@@ -203,6 +232,16 @@ def get_image_raw_bytes_and_dims(
 # 3. TIMECODE & FILENAME PARSING
 # ==========================================
 
+def _timecode_to_ms(raw: str) -> int:
+    """Converts a 'H_MM_SS_frac[_...]' timecode into milliseconds (frac: 2 digits = centiseconds)."""
+    parts = raw.split("_")
+    h, m, s, frac = int(parts[0]), int(parts[1]), int(parts[2]), parts[3]
+    if not frac.isdigit():
+        raise ValueError(f"Invalid timecode fraction: {frac!r}")
+    ms = int(frac) * 10 if len(frac) == 2 else int(frac.ljust(3, "0")[:3])
+    return h * 3600000 + m * 60000 + s * 1000 + ms
+
+
 def parse_filename_timecodes(filename: str | Path) -> tuple[int, int, bool]:
     """
     Extracts start_ms, end_ms, and is_top flag directly from VideoSubFinder image filename.
@@ -214,54 +253,22 @@ def parse_filename_timecodes(filename: str | Path) -> tuple[int, int, bool]:
     is_top = name_without_ext.startswith("top_")
 
     if name_without_ext.startswith(("top_", "bot_")):
-        timecode_part = "_".join(name_without_ext.split("_")[1:])
+        timecode_part = name_without_ext[4:]
     else:
         timecode_part = name_without_ext
 
-    start_raw, end_raw = timecode_part.split("__")
-
-    s_parts = start_raw.split("_")
-    s_h, s_m, s_s, s_frac = int(s_parts[0]), int(s_parts[1]), int(s_parts[2]), s_parts[3]
-    s_ms = int(s_frac) * 10 if len(s_frac) == 2 else int(s_frac.ljust(3, "0")[:3])
-    start_ms = s_h * 3600000 + s_m * 60000 + s_s * 1000 + s_ms
-
-    e_parts = end_raw.split("_")
-    e_h, e_m, e_s, e_frac = int(e_parts[0]), int(e_parts[1]), int(e_parts[2]), e_parts[3]
-    e_ms = int(e_frac) * 10 if len(e_frac) == 2 else int(e_frac.ljust(3, "0")[:3])
-    end_ms = e_h * 3600000 + e_m * 60000 + e_s * 1000 + e_ms
-
-    return start_ms, end_ms, is_top
+    start_raw, end_raw = timecode_part.split("__", 1)
+    return _timecode_to_ms(start_raw), _timecode_to_ms(end_raw), is_top
 
 
-def timecode_key(item) -> tuple[int, int, int, int]:
+def timecode_key(item) -> tuple[int, str]:
     """Sorting key for images based on starting timecode extracted from filename."""
-    if isinstance(item, tuple):
-        filename = str(item[0])
-    elif isinstance(item, (Path, str)):
-        filename = str(item)
-    else:
-        filename = str(item)
-    filename = Path(filename).name
+    filename = Path(str(item[0] if isinstance(item, tuple) else item)).name
     try:
-        name_without_ext = filename.rsplit(".", 1)[0]
-
-        if name_without_ext.startswith(("bot_", "top_")):
-            timecode_part = "_".join(name_without_ext.split("_")[1:])
-        else:
-            timecode_part = name_without_ext
-
-        start_timecode = timecode_part.split("__")[0]
-        parts = start_timecode.split("_")
-
-        hour = int(parts[0])
-        minute = int(parts[1])
-        second = int(parts[2])
-        frac = parts[3]
-        ms = int(frac) * 10 if len(frac) == 2 else int(frac)
-
-        return (hour, minute, second, ms)
+        start_ms, _, _ = parse_filename_timecodes(filename)
+        return (start_ms, filename)
     except (IndexError, ValueError):
-        return (99, 99, 99, 999999)
+        return (2**63, filename)
 
 
 # ==========================================
@@ -296,15 +303,109 @@ def get_in_path(name: str) -> str | None:
         return None
 
 
+class OcrCache:
+    """
+    OCR results stored on disk by image content hash, so an interrupted or repeated run doesn't send the
+    same images again. Results are kept per settings signature (engine, language, line mode...), and only
+    non-empty results are stored, so failed or empty images are retried next time.
+    """
+
+    def __init__(self, path: Path | str, signature: str):
+        self.path = Path(path)
+        self.signature = signature
+        self._lock = threading.Lock()
+        self._dirty = 0
+        try:
+            self._data: dict[str, dict[str, str]] = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            self._data = {}
+        self._entries = self._data.setdefault(signature, {})
+
+    @staticmethod
+    def image_key(image_path: Path | str) -> str:
+        return hashlib.sha1(Path(image_path).read_bytes()).hexdigest()
+
+    def get(self, key: str) -> str | None:
+        return self._entries.get(key)
+
+    def put(self, key: str, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            self._entries[key] = text
+            self._dirty += 1
+            if self._dirty >= 50:
+                self._save_locked()
+
+    def save(self) -> None:
+        with self._lock:
+            if self._dirty:
+                self._save_locked()
+
+    def _save_locked(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
+        self._dirty = 0
+
+
 def collect_images(images_dir: Path | str) -> List[Path]:
     """Collects and returns all supported image files from a directory."""
     images_dir = Path(images_dir)
+    if not images_dir.is_dir():
+        return []
     valid_suffixes = {".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"}
     images = [
         p for p in images_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in valid_suffixes
     ]
     return sorted(images)
+
+
+def parse_time_ms(value: str) -> int:
+    """
+    Parses a user-supplied time into milliseconds. Accepts seconds ('90', '90.5'),
+    'M:SS', 'H:MM:SS', and a millisecond part after '.', ',' or a 4th ':' ('0:01:30:500', '0:01:30.500').
+    """
+    parts = value.strip().replace(",", ".").split(":")
+    millis = 0
+    if len(parts) == 4:  # H:MM:SS:mmm (VideoSubFinder format)
+        if not re.fullmatch(r"\d{1,3}", parts[3]):
+            raise ValueError(f"invalid time {value!r}")
+        millis = int(parts[3])
+        parts = parts[:3]
+    if not 1 <= len(parts) <= 3:
+        raise ValueError(f"invalid time {value!r}")
+
+    *whole, seconds = parts
+    if not all(p.isdigit() for p in whole) or not re.fullmatch(r"\d+(?:\.\d+)?", seconds):
+        raise ValueError(f"invalid time {value!r}")
+    if millis and "." in seconds:
+        raise ValueError(f"invalid time {value!r}")
+
+    total_s = float(seconds)
+    for i, p in enumerate(reversed(whole), 1):
+        total_s += int(p) * 60**i
+    return round(total_s * 1000) + millis
+
+
+def time_arg(value: str) -> int:
+    """ArgumentParser type for times (see parse_time_ms)."""
+    try:
+        return parse_time_ms(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"{exc}; use seconds, M:SS, H:MM:SS, H:MM:SS.mmm or H:MM:SS:mmm"
+        ) from exc
+
+
+def format_vsf_time(ms: int) -> str:
+    """Formats milliseconds the way VideoSubFinder's --start_time / --end_time expect (H:MM:SS:mmm)."""
+    h, rest = divmod(ms, 3600000)
+    m, rest = divmod(rest, 60000)
+    s, ms = divmod(rest, 1000)
+    return f"{h}:{m:02d}:{s:02d}:{ms:03d}"
 
 
 def float_range(mini: float, maxi: float) -> Callable[..., float]:

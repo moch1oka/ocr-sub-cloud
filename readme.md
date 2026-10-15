@@ -1,215 +1,151 @@
-# TPN-Team's OCR tool
+# cloudocr-sub
 
-A tool to extract and OCR subtitles from video files, Blu-ray PGS (`.sup`), DVD-SUP (`.sup`), DVD VobSub (`.sub`/`.idx`), or extracted images using **VideoSubFinder**, **Google Lens**, and **Bing Visual Search OCR**, generating Aegisub-compliant ASS and SRT subtitle files.
+Turns image-based subtitles into ASS/SRT text using cloud OCR. Based on TPN-Team's OCR tool. It takes:
 
-## Features
+- hardsubbed video (frames extracted with [VideoSubFinder](https://sourceforge.net/projects/videosubfinder/))
+- Blu-ray PGS `.sup`
+- DVD-SUP `.sup` (optionally with the disc's `.ifo` for colors)
+- DVD VobSub `.sub` + `.idx`
+- a folder of already-extracted images
 
-- **Multiple Cloud OCR Engines**:
-  - **Google Lens**: Uses official `google.protobuf` (compiled C++ `upb` backend) over persistent HTTP/1.1 connection pools, achieving blazing speeds of **25–30 images/sec** (via `--gglens_thread 64-80`).
-  - **Bing Visual Search OCR**: High-accuracy multi-threaded recognition with two-step token negotiation.
-- **Pure Python Image Subtitle Decoders (Self-contained, No External Tools)**:
-  - **Blu-ray PGS (.sup)**: Decodes 90kHz PTS timecodes, RLE bitmaps, and BT.709 color palettes directly in memory.
-  - **DVD-SUP (.sup / .ifo)**: Decodes DVD SPU frames (SP header) with optional `.ifo` video attributes and BT.601 color palettes.
-  - **DVD VobSub (.sub / .idx)**: Reassembles MPEG-2 Program Stream PES packets, parses `.idx` timestamps and 16-color palettes, with support for multi-language stream selection.
-  - **Auto-Detection for `.sup` files**: Automatically detects whether a `.sup` file is Blu-ray PGS (`PG` header) or DVD-SUP (`SP` header) without requiring manual format flags.
-  - **High-Contrast Preprocessing**: Automatically detects and tightly crops subtitle bounding boxes (`crop_subtitle_image`), compositing onto solid black backgrounds for optimal cloud OCR accuracy.
-  - **Zero-Duration and Invisible Caption Fixes**: Automatically compensates for missing `StopDisplay` commands and zero-alpha authoring bugs common on DVD discs.
-- **Language Presets (`-l / --lang {vi, en, ja, zh}`)**:
-  - Automatically tunes OCR engine requests, character whitelisting, and subtitle styles.
-  - **Japanese (`ja`) & Chinese (`zh`)**: Removes accidental OCR spaces between CJK characters, preserves full-width CJK punctuation without inserting unwanted ASCII spaces, and sets native CJK ASS subtitle fonts (`Meiryo` / `Microsoft YaHei`).
-  - **Vietnamese (`vi`) & English (`en`)**: Preserves Vietnamese diacritics, normalizes quotes, and standardizes spacing around punctuation.
-- **Smart Line Breaks & Layout**: Geometry Y-coordinate clustering (`y_cluster`) accurately reconstructs multi-line dialogue layouts without arbitrary breaks or merging separate speakers.
-- **Local Italic Style Detection (`--detect_italic`)**: Cloud OCR engines (Google Lens, Bing) do not detect font styles. This tool analyzes text line patches locally using shear projection profile variance, detecting italic/slanted text in ~1ms and preserving it via `{\i1}...{\i0}` in ASS and `<i>...</i>` in SRT.
-- **Intelligent Subtitle Merging**: Fuzzy SequenceMatcher merges consecutive frames of the same utterance even when minor OCR artifacts (missing punctuation, character variations) occur.
-- **Dedicated Dual Export Formats**:
-  - `.srt`: Uses exact 3-digit millisecond timecodes directly from image filenames (`HH:MM:SS,mmm`) with `{\an8}` top-subtitle support.
-  - `.ass`: Aegisub-compliant half-up centisecond rounding (`H:MM:SS.cc`) with language-optimized fonts and styles.
-  - Output `.ass`, `.srt`, or `both` simultaneously.
-  - Custom base naming via `-n / --output_name`.
-- **Seamless VideoSubFinder Integration**: Automatically detects and loads `settings/general.cfg` located next to `VideoSubFinderWXW.exe`, fully preserving user settings.
+The text recognition is done by Google Lens (default) or Bing. Both are the unofficial web endpoints those services use, so every subtitle image is uploaded to Google or Microsoft, an internet connection is required, and things can break if they change their APIs.
 
----
+PGS, DVD-SUP and VobSub are decoded in pure Python; VideoSubFinder is only needed for video.
 
 ## Setup
 
-### Step 1: Install Python
-Ensure Python 3.12+ is installed.
+Python 3.12 or newer.
 
-### Step 2: Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 3: VideoSubFinder (Optional, only needed for video hardsubs)
-If extracting hardcoded subtitles from video files, download [VideoSubFinder](https://sourceforge.net/projects/videosubfinder/). You can either place `VideoSubFinderWXW.exe` in your system `PATH` or pass its path via `-vsf`.
-*(Note: VideoSubFinder is NOT needed when processing PGS, DVD-SUP, VobSub, or pre-extracted images!)*
-
----
+For hardsubbed video, also download VideoSubFinder and either put `VideoSubFinderWXW.exe` on your `PATH` or pass its path with `-vsf`. If there is a `settings/general.cfg` next to the exe, it's picked up automatically.
 
 ## Usage
 
-### 1. OCR from DVD VobSub (.sub / .idx)
-Directly extract and OCR DVD VobSub subtitle files without external tools:
+```bash
+# Blu-ray PGS or DVD-SUP (detected from the file header)
+python run.py -i "movie.sup" -f both
+
+# DVD-SUP with colors from the disc
+python run.py --sup "movie.sup" --ifo "VTS_01_0.IFO"
+
+# VobSub: pass the .sub or the .idx, the other one must have the same name
+python run.py -i "movie.sub" -l en
+python run.py --vobsub "movie.sub" --stream_id 1      # pick a stream when there are several
+
+# Only forced subtitles (PGS / DVD)
+python run.py -i "movie.sup" --forced_only
+
+# Only part of the file, e.g. to try settings on a few minutes before running the whole thing
+python run.py -i "movie.sup" --start_time 1:28:00 --end_time 1:31:00
+
+# A folder of images, e.g. VideoSubFinder's RGBImages
+python run.py --img_dir "path/to/RGBImages" -n ep01
+
+# Hardsubbed video, or a folder of videos (searched recursively)
+python run.py -i "ep01.mkv" -f both
+python run.py -vsf "D:\VideoSubFinder\VideoSubFinderWXW.exe" -i "D:\season1"
+
+# Use Bing instead of Google Lens
+python run.py -i "movie.sup" --ocr_engine bing
+```
+
+### Where the output goes
+
+- `--img_dir`: `outputs/<name>.ass`, where the name is `-n` or `output_subtitles`.
+- Everything else: `outputs/<name>/<name>.ass`, where the name is `-n` or the input file's name. The extracted images are kept next to it (`PGS_Images/`, `DvdSup_Images/`, `VobSub_Images/` or `VSF_Results/`).
+- `-n` is ignored when a folder contains more than one video.
+- Existing files are never overwritten; a `_1`, `_2`, … suffix is added instead.
+- Images that gave no text are left out of the subtitles and listed in `<name>_no_text.txt` next to them, so you can check them by hand.
+- OCR results are cached in `.ocr_cache.json` in the output folder. Running the same command again (after a crash, Ctrl+C, or to try another output format) only sends images that aren't done yet. Images that gave no text are always retried. Use `--no-ocr_cache` to turn this off.
+
+### Image file names
+
+When you use `--img_dir`, the timing comes from the file names, in the format VideoSubFinder writes:
+
+```
+0_00_02_169__0_00_05_004_<anything>.jpeg       start 0:00:02.169, end 0:00:05.004
+top_0_01_19_120__0_01_20_038_<anything>.png    same, shown at the top of the screen
+```
+
+Files whose names don't follow this pattern are skipped.
+
+## Things worth knowing
+
+- **Language (`-l`)** controls a few things: the language hint sent to the OCR service, which characters survive cleanup, the default ASS font (Arial for `vi`/`en`, Meiryo for `ja`, Microsoft YaHei for `zh`), and how aggressively near-identical neighbouring lines are merged. For `ja`/`zh` it also removes the stray spaces OCR puts between CJK characters. For VobSub it's also used to pick the stream when `--stream_id` isn't given.
+- **Merging:** consecutive images with the same (or almost the same) text and less than 1 s between them become one subtitle line. This is what turns VideoSubFinder's many frames per line into a single entry.
+- **Top/bottom:** subtitles in the upper 35% of the screen get the `Top` style in ASS and `{\an8}` in SRT. In PGS, a top sign and a bottom line shown at the same time become two separate entries.
+- **Italics (`--detect_italic`)** are guessed locally from the slant of each text line, since neither OCR service reports font style. Off by default; check the results.
+- **Line breaks (`--line_break_mode`):** `y_cluster` (default) groups the recognized lines into rows by their vertical position; `line` keeps every line the OCR service returns; `paragraph` joins each paragraph into one line.
+- **Braces:** `{` and `}` start override tags in ASS, so any the OCR reads are written as `｛` `｝` in the `.ass` file (the `.srt` keeps them as they are).
+- **Timing:** SRT keeps the exact milliseconds. ASS only has centiseconds, so times are rounded the way Aegisub does it.
+- **DVD:** without an `.ifo`, DVD-SUP uses a generic palette, so colors may be off. Usually it doesn't matter for OCR. Subtitles with no end time get one from the next subtitle's start, capped at 5 s.
+
+## Options
+
+General:
+
+| Option | Default | |
+|---|---|---|
+| `-i`, `--video_dir` | | Video, folder of videos, `.sup`, `.sub` or `.idx` |
+| `--img_dir` | | Folder of images; skips extraction |
+| `--sup` / `--vobsub` / `--idx` / `--ifo` | | Explicit paths, instead of `-i` |
+| `--stream_id` | auto | VobSub stream to use |
+| `--forced_only` | off | Only forced subtitles (PGS / DVD) |
+| `--start_time`, `--end_time` | whole file | Only subtitles on screen in this range (`.sup`, `.sub`, video). Seconds, `M:SS`, `H:MM:SS`, `H:MM:SS.mmm` or `H:MM:SS:mmm` |
+| `-o`, `--output_dir` | `outputs` | |
+| `-n`, `--output_name` | input name | Base name of the output file |
+| `-f`, `--format` | `ass` | `ass`, `srt` or `both` |
+| `-l`, `--lang` | `vi` | `vi`, `en`, `ja`, `zh` |
+| `--font` | per language | ASS font |
+
+OCR:
+
+| Option | Default | |
+|---|---|---|
+| `--ocr_engine` | `gglens` | `gglens` or `bing` |
+| `--gglens_thread` | 32 | Parallel requests to Google Lens |
+| `--bing_thread` | 32 | Parallel requests to Bing |
+| `--line_break_mode` | `y_cluster` | `y_cluster`, `line`, `paragraph` |
+| `--detect_italic` | off | |
+| `--[no-]ocr_cache` | on | Reuse results of earlier runs |
+
+The defaults can also be changed at the top of `run.py`.
+
+VideoSubFinder. These are passed straight to VideoSubFinder, and anything you don't set comes from `general.cfg`:
+
+| Option | |
+|---|---|
+| `-vsf`, `--vsf_exe_path` | Path to `VideoSubFinderWXW.exe` (default: from `PATH`) |
+| `-gs`, `--general_settings` | Path to a `general.cfg` |
+| `-te`, `-be`, `-le`, `-re` | Search area as a fraction of the frame (top/bottom measured from the bottom) |
+| `-nthr`, `-nocrthr` | Threads for searching / for cleared text images |
+| `--[no-]clear_dirs` | Clear previous images first (default on) |
+| `--[no-]run_search` | Search for frames with text (default on) |
+| `--[no-]create_cleared_text_images` | OCR the cleaned `TXTImages` instead of `RGBImages` (default off) |
+| `--[no-]open_video_opencv`, `--[no-]open_video_ffmpeg` | Video decoder; OpenCV unless ffmpeg is asked for |
+| `--[no-]use_cuda` | |
+| `--use_filter_color`, `--moderate_threshold`, `--moderate_threshold_for_scaled_image`, `--image_scale_for_clear_image`, `--video_gamma`, `--[no-]clear_txt_images_by_main_color`, `--[no-]use_ILA_images_*` | VideoSubFinder's text-cleaning settings |
+
+Recognized video extensions: `.mp4 .mkv .avi .mov .m4v .ts .m2ts .mts .webm .wmv .flv .mpg .mpeg`.
+
+Run `python run.py -h` for the full list.
+
+## Tests
 
 ```bash
-# Provide .sub file (companion .idx with same base name in same directory is auto-detected)
-python run.py -i "path/to/movie.sub" -o outputs -n movie_sub -f both
+# Offline unit tests
+python -m unittest discover -s tests -v
 
-# Or pass .idx directly:
-python run.py -i "path/to/movie.idx" -o outputs -n movie_sub -f both
-
-# Or specify both explicitly:
-python run.py --vobsub "path/to/movie.sub" --idx "path/to/movie.idx" -o outputs -n movie_sub -l en
-
-# Select a specific subtitle stream ID when multiple languages exist in VobSub:
-python run.py --vobsub "path/to/movie.sub" --stream_id 1 -o outputs -n movie_sub -l en
+# Real OCR on the sample images in test/, then check the result
+python run.py --img_dir test -f both
+python tests/check_output.py outputs/output_subtitles.ass outputs/output_subtitles.srt
 ```
 
-### 2. OCR from Blu-ray PGS or DVD-SUP (.sup)
-The tool auto-detects Blu-ray PGS vs DVD-SUP formats by inspecting file headers:
+## Credits
 
-```bash
-# Auto-detects Blu-ray PGS or DVD-SUP from .sup file:
-python run.py -i "path/to/subtitles.sup" -o outputs -n my_subtitles -f both
-
-# Supply an optional .ifo file for DVD-SUP palette:
-python run.py --sup "path/to/movie.sup" --ifo "path/to/VTS_01_0.IFO" -o outputs -n movie_sub
-
-# Only extract and OCR forced subtitles:
-python run.py --sup "path/to/subtitles.sup" -o outputs -n forced_sub --forced_only
-```
-
-### 3. OCR from Extracted Images Directory
-If you already have extracted images (e.g. from VideoSubFinder's `RGBImages` folder):
-
-```bash
-# Using Google Lens (default, high speed with 64-80 threads)
-python run.py --img_dir "path/to/RGBImages" -o outputs -n my_subtitles --gglens_thread 80
-
-# Using Bing OCR
-python run.py --img_dir "path/to/RGBImages" -o outputs -n my_subtitles --ocr_engine bing
-```
-
-### 4. Full Pipeline from Video File (Hardsub)
-Extract frames with VideoSubFinder and OCR in one command:
-
-```bash
-# VideoSubFinder auto-detects its general.cfg next to VideoSubFinderWXW.exe
-python run.py -i "path/to/video.mp4" -o outputs -n ep01_sub -f both
-
-# If VideoSubFinder is not in PATH, specify with -vsf:
-python run.py -vsf "E:\VideoSubFinder\Release_x64\VideoSubFinderWXW.exe" -i "path/to/video.mp4" -o outputs -n ep01_sub --ocr_engine gglens --gglens_thread 64
-```
-
----
-
-## CLI Options
-
-### General & Output Options
-```text
-  -o, --output_dir OUTPUT_DIR
-                        The path to output directory. Default: outputs
-  -n, --output_name, --output-name <outputname>
-                        Base name for output subtitle file (without extension).
-                        Default: derived from input file stem or 'output_subtitles'
-  -f, --format {ass,srt,both}
-                        Subtitle output format. Choices: ['ass', 'srt', 'both']. Default: ass
-  -l, --lang {vi,en,ja,zh}
-                        Language preset for OCR engine, text cleanup, font, and subtitle merging.
-                        Choices: ['vi', 'en', 'ja', 'zh']. Default: vi
-  --font FONT           Override default font for ASS subtitles (e.g. 'Arial', 'Meiryo', 'Microsoft YaHei').
-```
-
-### Subtitle & Image Input Options
-```text
-  -i, --video_dir VIDEO_DIR
-                        Path to video, directory of videos, Blu-ray PGS (.sup),
-                        DVD-SUP (.sup), or DVD VobSub (.sub / .idx).
-  --sup SUP             Path to subtitle file (.sup), supporting both Blu-ray PGS and DVD-SUP.
-                        Can also be passed via -i / --video_dir.
-  --vobsub VOBSUB       Path to DVD VobSub file (.sub). Can also be passed via -i / --video_dir.
-  --idx IDX             Path to DVD VobSub index file (.idx). Optional if located in the same directory as .sub.
-  --ifo IFO             Path to DVD IFO file (.ifo) for DVD-SUP palette. Optional if located in the same directory as .sup.
-  --stream_id STREAM_ID Stream ID for DVD VobSub when multiple languages exist. Default: auto.
-  --forced_only         Only extract and OCR forced subtitles from PGS / DVD subtitle file. Default: False.
-  --img_dir IMG_DIR     Path of directory containing extracted images (skips image extraction step).
-```
-
-### OCR Engine Settings
-```text
-  --ocr_engine {gglens,bing}
-                        Select OCR engine. Choices: ['gglens', 'bing']. Default: gglens
-  --gglens_thread GGLENS_THREAD
-                        Google Lens OCR threads (e.g. 32-80 threads for 20-30 img/s). Default: 32
-  --bing_thread BING_THREAD
-                        Bing OCR threads. Default: 32
-  --line_break_mode {y_cluster,line,paragraph}
-                        Line break detection mode:
-                        - 'y_cluster': Smart Y-coordinate clustering (recommended)
-                        - 'line': Break on every line
-                        - 'paragraph': Break only on paragraphs
-                        Default: y_cluster
-  --detect_italic / --no-detect_italic
-                        Enable local detection and preservation of italic text (e.g. {\i1} in ASS, <i> in SRT).
-                        Default: False
-```
-
-### VideoSubFinder Settings
-```text
-  -vsf, --vsf_exe_path VSF_EXE_PATH
-                        Full path to VideoSubFinderWXW.exe (default: auto-detected from PATH).
-  -gs, --general_settings GENERAL_SETTINGS
-                        Path to general.cfg (default: auto-detected from [VSF PATH]/settings/general.cfg).
-  --start_time START_TIME
-                        Start time (format hour:min:sec:millisec, default: from general.cfg or video start).
-  --end_time END_TIME   End time (format hour:min:sec:millisec, default: from general.cfg or video end).
-  -te, --top_video_image_percent_end TOP_VIDEO_IMAGE_PERCENT_END
-                        Top video image percent offset from image bottom (override general.cfg).
-  -be, --bottom_video_image_percent_end BOTTOM_VIDEO_IMAGE_PERCENT_END
-                        Bottom video image percent offset from image bottom (override general.cfg).
-  -le, --left_video_image_percent_end LEFT_VIDEO_IMAGE_PERCENT_END
-                        Left video image percent end (override general.cfg).
-  -re, --right_video_image_percent_end RIGHT_VIDEO_IMAGE_PERCENT_END
-                        Right video image percent end (override general.cfg).
-  -nthr, --num_threads NUM_THREADS
-                        Number of threads used for Run Search (override general.cfg).
-  -nocrthr, --num_ocr_threads NUM_OCR_THREADS
-                        Number of threads used for Create Cleared TXT Images (override general.cfg).
-  --clear_dirs / --no-clear_dirs
-                        Enable/disable clearing previous image folders before search. Default: True.
-  --run_search / --no-run_search
-                        Enable/disable Run Search (find hardsub frames). Default: True.
-  --create_cleared_text_images / --no-create_cleared_text_images
-                        Enable/disable Create Cleared Text Images. Default: False.
-  --open_video_opencv / --no-open_video_opencv
-                        Enable/disable opening video by OpenCV (default). Default: True.
-  --open_video_ffmpeg / --no-open_video_ffmpeg
-                        Enable/disable opening video by FFMPEG.
-  --use_cuda / --no-use_cuda
-                        Enable/disable CUDA GPU acceleration.
-  --use_filter_color USE_FILTER_COLOR
-                        Define filter color (e.g. "Lab: l:200-255 a:118-138 b:118-138").
-  --moderate_threshold MODERATE_THRESHOLD
-                        Define moderate_threshold (override general.cfg).
-  --moderate_threshold_for_scaled_image MODERATE_THRESHOLD_FOR_SCALED_IMAGE
-                        Define moderate_threshold_for_scaled_image [0.1 - moderate_threshold].
-  --image_scale_for_clear_image IMAGE_SCALE_FOR_CLEAR_IMAGE
-                        Define image scale for clear image (override general.cfg).
-  --video_gamma VIDEO_GAMMA
-                        Define video_gamma [0.0 - 1.0] (override general.cfg).
-  --clear_txt_images_by_main_color / --no-clear_txt_images_by_main_color
-                        Enable/disable clear txt images by main color.
-  --use_ILA_images_for_getting_txt_symbols_areas / --no-use_ILA_images_for_getting_txt_symbols_areas
-                        Enable/disable use ILA images for getting txt symbols areas.
-  --use_ILA_images_before_clear_txt_images_from_borders / --no-use_ILA_images_before_clear_txt_images_from_borders
-                        Enable/disable use ILA images before clear txt images from borders.
-  --use_ILA_images_for_clear_txt_images / --no-use_ILA_images_for_clear_txt_images
-                        Enable/disable use ILA images for clear txt images.
-```
-
----
-
-## Acknowledgements
 - [VideoSubFinder](https://sourceforge.net/projects/videosubfinder/)
 - [owocr](https://github.com/AuroraWright/owocr)
 - [BDSup2Sub](https://github.com/mjuhasz/BDSup2Sub)

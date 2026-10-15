@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import io
 from pathlib import Path
 import re
 import struct
@@ -7,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 
-from pgs import crop_subtitle_image
+from pgs import crop_subtitle_image, flatten_on_black
 
 # Default 16-color DVD CLUT palette (RGB)
 DEFAULT_DVD_PALETTE: List[Tuple[int, int, int]] = [
@@ -169,16 +168,16 @@ class DvdSpu:
                         if (nibble_idx & 1) == 1:
                             nibble_idx += 1
 
-            # Put pixels
-            trg_row_offset = line * width
-            for _ in range(length):
-                if x < width and line < height:
-                    trg[trg_row_offset + x] = col
-                    x += 1
+            # Put pixels, a whole run at a time
+            while length > 0 and line < height:
+                count = min(length, width - x)
+                start = line * width + x
+                trg[start:start + count] = bytes((col,)) * count
+                x += count
+                length -= count
                 if x >= width:
                     line += 2  # Interlaced step
                     x = 0
-                    trg_row_offset = line * width
                     # Byte-align nibbles after line wrap
                     if (nibble_idx & 1) == 1:
                         nibble_idx += 1
@@ -342,27 +341,20 @@ class DvdSpu:
             a = (alpha_values[i] * 255) // 15
             rgba_palette.append((r, g, b, a))
 
-        # Build RGBA bytearray
-        rgba_bytes = bytearray(width * height * 4)
-        for idx, col_idx in enumerate(raw_pixels):
-            r, g, b, a = rgba_palette[col_idx & 3]
-            offset = idx * 4
-            rgba_bytes[offset] = r
-            rgba_bytes[offset + 1] = g
-            rgba_bytes[offset + 2] = b
-            rgba_bytes[offset + 3] = a
+        # Paletted image (2-bit indices) -> RGBA
+        raw_img = Image.frombytes("P", (width, height), bytes(raw_pixels))
+        raw_img.putpalette([v for c in rgba_palette for v in c], rawmode="RGBA")
+        raw_img = raw_img.convert("RGBA")
 
-        raw_img = Image.frombytes("RGBA", (width, height), bytes(rgba_bytes))
+        # Nothing visible (fully transparent, or a blank box): not worth an OCR request
+        content_bbox = raw_img.getchannel("A").getbbox()
+        if content_bbox is None:
+            return None
 
-        # Crop tightly around text
-        cropped_img = crop_subtitle_image(raw_img, padding=10)
-
-        # Composite onto solid black background for maximum contrast with OCR engines
-        bg = Image.new("RGB", cropped_img.size, (0, 0, 0))
-        if cropped_img.mode == "RGBA":
-            bg.paste(cropped_img, mask=cropped_img.split()[3])
-        else:
-            bg.paste(cropped_img)
+        # Crop tightly around text, then composite onto black for maximum contrast with OCR engines
+        bg = flatten_on_black(crop_subtitle_image(raw_img, padding=10))
+        if bg.convert("L").getextrema()[0] == bg.convert("L").getextrema()[1]:
+            return None
 
         # Determine end time
         if duration_ms is not None and duration_ms > 0:
@@ -370,7 +362,8 @@ class DvdSpu:
         else:
             end_ms = start_ms
 
-        is_top = y_start < (screen_height * 0.35)
+        # The display area is often the whole screen, so judge position by where the visible pixels are
+        is_top = (y_start + content_bbox[1]) < (screen_height * 0.35)
 
         return DvdSubtitle(
             start_ms=start_ms,
@@ -396,6 +389,7 @@ class IdxParser:
         self.screen_height = 480
         self.palette: List[Tuple[int, int, int]] = list(DEFAULT_DVD_PALETTE)
         self.languages: Dict[int, str] = {}  # stream_id -> lang_code
+        self.default_stream: Optional[int] = None  # "langidx:" (the stream the author marked as default)
         self.entries: List[Tuple[int, int, int]] = []  # (start_ms, filepos, stream_id)
         self.parse()
 
@@ -404,6 +398,8 @@ class IdxParser:
             return
 
         current_stream_id = 0
+        delay_ms = 0  # "delay:" offset applied to the timestamps of the current language section
+        global_offset_ms = 0  # "time offset:" applied to every timestamp
 
         with open(self.idx_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -448,6 +444,38 @@ class IdxParser:
                         if idx_match:
                             current_stream_id = int(idx_match.group(1))
                     self.languages[current_stream_id] = lang_code
+                    delay_ms = 0
+                    continue
+
+                if line.lower().startswith("langidx:"):
+                    m = re.search(r"(\d+)", line)
+                    if m:
+                        self.default_stream = int(m.group(1))
+                    continue
+
+                # Global offset, in ms or as a timestamp (e.g. "time offset: -1500" / "time offset: 00:00:01:500")
+                if line.lower().startswith("time offset:"):
+                    val = line[len("time offset:"):].strip()
+                    m = re.fullmatch(r"([+-]?)\s*(\d+):(\d+):(\d+):(\d+)", val)
+                    if m:
+                        sign = -1 if m.group(1) == "-" else 1
+                        global_offset_ms = sign * (
+                            int(m.group(2)) * 3600000 + int(m.group(3)) * 60000
+                            + int(m.group(4)) * 1000 + int(m.group(5))
+                        )
+                    elif re.fullmatch(r"[+-]?\d+", val):
+                        global_offset_ms = int(val)
+                    continue
+
+                # Time offset for the following timestamps (e.g. "delay: -00:00:01:500")
+                if line.lower().startswith("delay:"):
+                    m = re.search(r"delay:\s*([+-]?)\s*(\d+):(\d+):(\d+):(\d+)", line, re.IGNORECASE)
+                    if m:
+                        sign = -1 if m.group(1) == "-" else 1
+                        delay_ms = sign * (
+                            int(m.group(2)) * 3600000 + int(m.group(3)) * 60000
+                            + int(m.group(4)) * 1000 + int(m.group(5))
+                        )
                     continue
 
                 # Subtitle timestamp & file position (e.g. "timestamp: 00:01:23:456, filepos: 000000000")
@@ -463,7 +491,7 @@ class IdxParser:
                         minute = int(m.group(2))
                         s = int(m.group(3))
                         ms = int(m.group(4))
-                        start_ms = h * 3600000 + minute * 60000 + s * 1000 + ms
+                        start_ms = max(0, h * 3600000 + minute * 60000 + s * 1000 + ms + delay_ms + global_offset_ms)
                         filepos = int(m.group(5), 16)
                         self.entries.append((start_ms, filepos, current_stream_id))
 
@@ -513,10 +541,11 @@ class IfoParser:
                 if pal_ofs + 64 <= len(data):
                     extracted_pal = []
                     for i in range(16):
+                        # Each entry is {0, Y, Cr, Cb}
                         entry_ofs = pal_ofs + i * 4
                         y = data[entry_ofs + 1]
-                        cb = data[entry_ofs + 2]
-                        cr = data[entry_ofs + 3]
+                        cr = data[entry_ofs + 2]
+                        cb = data[entry_ofs + 3]
                         rgb = ycbcr_to_rgb_bt601(y, cb, cr)
                         extracted_pal.append(rgb)
                     if len(extracted_pal) == 16:
@@ -549,16 +578,7 @@ class VobSubParser:
         if not self.sub_path.is_file():
             return []
 
-        # Determine target stream ID
-        target_stream = stream_id
-        if target_stream is None and lang_code:
-            for sid, code in self.idx.languages.items():
-                if code == lang_code.lower():
-                    target_stream = sid
-                    break
-        if target_stream is None:
-            # Default to first stream available
-            target_stream = self.idx.entries[0][2] if self.idx.entries else 0
+        target_stream = self.select_stream(stream_id, lang_code)
 
         subtitles: List[DvdSubtitle] = []
 
@@ -598,6 +618,8 @@ class VobSubParser:
 
                     pes_len = (sector[pes_start + 4] << 8) | sector[pes_start + 5]
                     header_data_len = sector[pes_start + 8]
+                    if pes_start + 9 + header_data_len >= len(sector):
+                        break
                     stream_byte = sector[pes_start + 9 + header_data_len]
 
                     # DVD subpicture stream IDs are 0x20 to 0x3F
@@ -633,13 +655,38 @@ class VobSubParser:
 
         return subtitles
 
+    def select_stream(self, stream_id: Optional[int] = None, lang_code: Optional[str] = None) -> int:
+        """
+        Picks the stream to decode: explicit stream_id, else the first non-empty stream in lang_code,
+        else the .idx default (langidx) if it has entries, else the first stream that has entries.
+        Streams declared in the .idx but without any timestamps are never picked automatically.
+        """
+        if stream_id is not None:
+            return stream_id
+
+        non_empty = []
+        for _, _, sid in self.idx.entries:
+            if sid not in non_empty:
+                non_empty.append(sid)
+        if not non_empty:
+            return 0
+
+        if lang_code:
+            for sid in non_empty:
+                if self.idx.languages.get(sid) == lang_code.lower():
+                    return sid
+        if self.idx.default_stream in non_empty:
+            return self.idx.default_stream
+        return non_empty[0]
+
     @staticmethod
     def _fix_subtitle_durations(subtitles: List[DvdSubtitle]) -> None:
         """
         Fixes subtitles with missing or negative durations (common on DVD authoring).
+        Valid durations are kept as-is, however long they are.
         """
         for i, sub in enumerate(subtitles):
-            if sub.end_ms <= sub.start_ms or (sub.end_ms - sub.start_ms) > 8000:
+            if sub.end_ms <= sub.start_ms:
                 if i + 1 < len(subtitles):
                     gap = subtitles[i + 1].start_ms - sub.start_ms - 50
                     sub.end_ms = sub.start_ms + max(100, min(5000, gap))
@@ -724,40 +771,3 @@ class DvdSupParser:
         VobSubParser._fix_subtitle_durations(subtitles)
 
         return subtitles
-
-
-def save_dvd_images(subtitles: List[DvdSubtitle], output_dir: Path) -> Path:
-    """
-    Saves subtitle images into output_dir with VideoSubFinder-compatible filenames:
-    {prefix}{H}_{MM}_{SS}_{mmm}__{H}_{MM}_{SS}_{mmm}_{width}x{height}.png
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for sub in subtitles:
-        s_total = sub.start_ms
-        s_h = s_total // 3600000
-        s_total %= 3600000
-        s_m = s_total // 60000
-        s_total %= 60000
-        s_s = s_total // 1000
-        s_ms = s_total % 1000
-
-        e_total = sub.end_ms
-        e_h = e_total // 3600000
-        e_total %= 3600000
-        e_m = e_total // 60000
-        e_total %= 60000
-        e_s = e_total // 1000
-        e_ms = e_total % 1000
-
-        prefix = "top_" if sub.is_top else ""
-        filename = (
-            f"{prefix}{s_h}_{s_m:02d}_{s_s:02d}_{s_ms:03d}__"
-            f"{e_h}_{e_m:02d}_{e_s:02d}_{e_ms:03d}_"
-            f"{sub.image.width}x{sub.image.height}.png"
-        )
-
-        img_path = output_dir / filename
-        sub.image.save(img_path, format="PNG", compress_level=1)
-
-    return output_dir

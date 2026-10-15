@@ -74,10 +74,11 @@ class VideoSubFinder:
             run_list.append("--run_search")
         if create_cleared_text_images:
             run_list.append("--create_cleared_text_images")
-        if open_video_opencv:
-            run_list.append("--open_video_opencv")
-        elif open_video_ffmpeg:
+        # An explicit --open_video_ffmpeg wins over the OpenCV default
+        if open_video_ffmpeg:
             run_list.append("--open_video_ffmpeg")
+        elif open_video_opencv:
+            run_list.append("--open_video_opencv")
         if use_cuda:
             run_list.append("--use_cuda")
         if general_settings:

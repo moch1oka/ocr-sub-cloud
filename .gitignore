@@ -57,6 +57,15 @@ desktop.ini
 *.out
 *.err
 
+# Real subtitle files for local testing only (copyrighted, and too big for the repo)
+test/pgs/
+test/subidx/
+*.sup
+*.sub
+*.idx
+*.ifo
+*.IFO
+
 # Output and scratch folders
 outputs/
 outputs*/

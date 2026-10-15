@@ -16,7 +16,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from languages import LanguageConfig, get_language_config
 from progress import ImageSecondSpeedColumn
-from utils import collect_images, timecode_key
+from utils import OcrCache, collect_images, timecode_key
 
 
 # ==========================================
@@ -230,9 +230,11 @@ class OCREngine(ABC):
                     return res
 
                 last_exception = Exception(f"Request failed with status code: {res.status_code}")
-                if attempt == max_retries - 1:
+                # Client errors (except timeout / rate limit) will not succeed on retry
+                retryable = res.status_code >= 500 or res.status_code in (408, 429) or res.status_code < 400
+                if attempt == max_retries - 1 or not retryable:
                     ctx = f" for {error_context}" if error_context else ""
-                    self.console.log(f"[yellow]Failed request{ctx} after {max_retries} attempts: {last_exception}[/yellow]")
+                    self.console.log(f"[yellow]Failed request{ctx} after {attempt + 1} attempt(s): {last_exception}[/yellow]")
                     return None
 
                 delay = 1.0 * (attempt + 1) if res.status_code == 429 else 0.5 * (attempt + 1)
@@ -255,12 +257,12 @@ class OCREngine(ABC):
     def format_recognized_text(
         self,
         lines: list[dict],
-        paragraphs: list[str] | None = None,
+        paragraphs: list[list[dict]] | None = None,
     ) -> str:
         """
         Formats recognized lines according to self.line_break_mode:
         - 'line': one line per recognized line (wrapped in {\\i1} if italic)
-        - 'paragraph': joined by paragraphs
+        - 'paragraph': one output line per paragraph (each paragraph is a list of line dicts)
         - 'y_cluster': clustered into visual rows based on normalized Y coordinates
         """
         if not lines:
@@ -276,8 +278,9 @@ class OCREngine(ABC):
                     formatted.append(txt)
             return "\n".join(formatted)
 
-        elif self.line_break_mode == "paragraph" and paragraphs is not None:
-            return "\n".join(p for p in paragraphs if p.strip())
+        elif self.line_break_mode == "paragraph" and paragraphs:
+            rows = (format_cluster_row([l for l in p if l.get("text", "").strip()]) for p in paragraphs)
+            return "\n".join(r for r in rows if r.strip())
 
         else:  # default: "y_cluster"
             return cluster_lines_by_y(lines)
@@ -293,9 +296,15 @@ class OCREngine(ABC):
         """Processes a single image file and returns the recognized text."""
         pass
 
-    def __call__(self, images_dir: Path) -> Dict[str, str]:
+    @property
+    def cache_signature(self) -> str:
+        """Settings that change OCR output; cached results are only reused when these match."""
+        return f"{self.engine_name}|{self.lang}|{self.line_break_mode}|italic={int(self.detect_italic)}"
+
+    def __call__(self, images_dir: Path, cache_path: Path | None = None) -> Dict[str, str]:
         """
         Processes all images in images_dir using multithreading with a Rich progress bar.
+        With cache_path, results of earlier runs are reused and new ones are stored there.
         Returns a sorted dictionary mapping image filename to recognized text.
         """
         images = collect_images(images_dir)
@@ -305,7 +314,37 @@ class OCREngine(ABC):
             return {}
 
         results: Dict[str, str] = {}
+        cache = OcrCache(cache_path, self.cache_signature) if cache_path else None
+        keys: Dict[str, str] = {}
+        todo = images
+        if cache:
+            todo = []
+            for img_path in images:
+                keys[img_path.name] = OcrCache.image_key(img_path)
+                cached = cache.get(keys[img_path.name])
+                if cached is not None:
+                    results[img_path.name] = cached
+                else:
+                    todo.append(img_path)
+            if results:
+                self.console.print(f"Reusing {len(results)} cached OCR results, {len(todo)} images left")
 
+        try:
+            if todo:
+                self._run_images(todo, results, cache, keys)
+        finally:
+            if cache:
+                cache.save()
+
+        return dict(sorted(results.items(), key=timecode_key))
+
+    def _run_images(
+        self,
+        images: List[Path],
+        results: Dict[str, str],
+        cache: OcrCache | None,
+        keys: Dict[str, str],
+    ) -> None:
         with Progress(
             TextColumn(f"[progress.description]{{task.description}} ({self.engine_name})"),
             BarColumn(),
@@ -317,7 +356,8 @@ class OCREngine(ABC):
         ) as progress:
             task = progress.add_task("Processing images", total=len(images))
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.threads) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.threads)
+            try:
                 future_to_image = {
                     executor.submit(self.process_image, str(img_path)): img_path.name
                     for img_path in images
@@ -326,17 +366,19 @@ class OCREngine(ABC):
                 for future in concurrent.futures.as_completed(future_to_image):
                     img_name = future_to_image[future]
                     try:
-                        text = future.result()
-                        with self.scan_lock:
-                            results[img_name] = text if text is not None else ""
+                        text = future.result() or ""
                     except Exception as exc:
                         self.console.print(f"[red]{img_name} generated an exception: {exc}[/red]")
-                        with self.scan_lock:
-                            results[img_name] = ""
+                        text = ""
+                    with self.scan_lock:
+                        results[img_name] = text
+                    if cache:
+                        cache.put(keys[img_name], text)
 
                     progress.update(task, advance=1)
-
-        return dict(sorted(results.items(), key=timecode_key))
+            finally:
+                # On Ctrl+C don't wait for every queued image; cached results are saved by the caller
+                executor.shutdown(wait=True, cancel_futures=True)
 
 
 # ==========================================

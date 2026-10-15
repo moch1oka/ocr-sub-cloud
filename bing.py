@@ -37,18 +37,21 @@ class BingOCR(OCREngine):
 
         # Step 1: Upload image to obtain insightsToken
         mp1 = CurlMime()
-        mp1.addpart(name="imgurl", data="")
-        mp1.addpart(name="cbir", data="sbi")
-        mp1.addpart(name="imageBin", data=img_b64)
+        try:
+            mp1.addpart(name="imgurl", data="")
+            mp1.addpart(name="cbir", data="sbi")
+            mp1.addpart(name="imageBin", data=img_b64)
 
-        r1 = self.post_with_retry(
-            self.upload_url,
-            multipart=mp1,
-            allow_redirects=False,
-            success_codes=(302,),
-            timeout=20,
-            error_context=f"upload {img_path}",
-        )
+            r1 = self.post_with_retry(
+                self.upload_url,
+                multipart=mp1,
+                allow_redirects=False,
+                success_codes=(302,),
+                timeout=20,
+                error_context=f"upload {img_path}",
+            )
+        finally:
+            mp1.close()
 
         if not r1:
             return ""
@@ -77,19 +80,22 @@ class BingOCR(OCREngine):
         }
 
         mp2 = CurlMime()
-        mp2.addpart(
-            name="knowledgeRequest",
-            content_type="application/json",
-            data=json.dumps(req_data),
-        )
+        try:
+            mp2.addpart(
+                name="knowledgeRequest",
+                content_type="application/json",
+                data=json.dumps(req_data),
+            )
 
-        r2 = self.post_with_retry(
-            api_url,
-            multipart=mp2,
-            headers=headers,
-            timeout=20,
-            error_context=f"knowledge API {img_path}",
-        )
+            r2 = self.post_with_retry(
+                api_url,
+                multipart=mp2,
+                headers=headers,
+                timeout=20,
+                error_context=f"knowledge API {img_path}",
+            )
+        finally:
+            mp2.close()
 
         if not r2:
             return ""
@@ -114,8 +120,9 @@ class BingOCR(OCREngine):
 
         img_gray = self.decode_grayscale(raw_bytes)
 
+        corners = ("topLeft", "topRight", "bottomRight", "bottomLeft")
         all_lines = []
-        para_texts = []
+        para_lines_list = []
         for r in regions:
             para_lines = []
             for l in r.get("lines", []):
@@ -123,33 +130,34 @@ class BingOCR(OCREngine):
                 if not txt:
                     continue
 
-                para_lines.append(txt)
-
                 quad = l.get("boundingBox")
-                if quad and all(k in quad for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")):
-                    cy = sum(quad[k]["y"] for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")) / 4.0
-                    cx = sum(quad[k]["x"] for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")) / 4.0
-                    h = max(quad["bottomRight"]["y"], quad["bottomLeft"]["y"]) - min(quad["topLeft"]["y"], quad["topRight"]["y"])
-                else:
-                    cy = 0.5
-                    cx = 0.5
-                    h = 0.1
-
                 is_ita = False
-                if img_gray is not None and quad and all(k in quad for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")):
-                    xs = [quad[k]["x"] for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")]
-                    ys = [quad[k]["y"] for k in ("topLeft", "topRight", "bottomRight", "bottomLeft")]
-                    if max(xs) <= 1.0 and max(ys) <= 1.0:
-                        min_x, max_x = min(xs) * width, max(xs) * width
-                        min_y, max_y = min(ys) * height, max(ys) * height
-                    else:
-                        min_x, max_x = min(xs), max(xs)
-                        min_y, max_y = min(ys), max(ys)
-                    is_ita = check_italic_patch(img_gray, int(min_x), int(min_y), int(max_x), int(max_y))
+                if quad and all(k in quad for k in corners):
+                    xs = [quad[k]["x"] for k in corners]
+                    ys = [quad[k]["y"] for k in corners]
+                    # Normalize pixel coordinates to 0..1 so clustering thresholds match Google Lens
+                    if max(xs) > 1.0 or max(ys) > 1.0:
+                        xs = [x / width for x in xs]
+                        ys = [y / height for y in ys]
+                    cx = sum(xs) / 4.0
+                    cy = sum(ys) / 4.0
+                    h = max(ys) - min(ys)
+                    if img_gray is not None:
+                        is_ita = check_italic_patch(
+                            img_gray,
+                            int(min(xs) * width),
+                            int(min(ys) * height),
+                            int(max(xs) * width),
+                            int(max(ys) * height),
+                        )
+                else:
+                    cy, cx, h = 0.5, 0.5, 0.1
 
-                all_lines.append({"text": txt, "cy": cy, "cx": cx, "h": h, "is_italic": is_ita})
+                line = {"text": txt, "cy": cy, "cx": cx, "h": h, "is_italic": is_ita}
+                all_lines.append(line)
+                para_lines.append(line)
 
             if para_lines:
-                para_texts.append(" ".join(para_lines))
+                para_lines_list.append(para_lines)
 
-        return self.format_recognized_text(all_lines, para_texts)
+        return self.format_recognized_text(all_lines, para_lines_list)

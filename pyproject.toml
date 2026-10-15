@@ -1,7 +1,7 @@
 [project]
-name = "ocr-sub"
-version = "0.2.0"
-description = "Extract and OCR subtitles from video files or extracted images using VideoSubFinder, Google Lens, and Bing Visual Search OCR."
+name = "cloudocr-sub"
+version = "0.3.0"
+description = "Turn image-based subtitles (hardsubbed video, Blu-ray PGS, DVD-SUP, VobSub) into ASS/SRT with cloud OCR (Google Lens, Bing)."
 requires-python = ">=3.12"
 dependencies = [
     "curl_cffi>=0.16.0",

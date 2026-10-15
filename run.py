@@ -2,11 +2,11 @@ import argparse
 from argparse import BooleanOptionalAction
 from pathlib import Path
 
-from dvdsub import DvdSupParser, VobSubParser, detect_sup_type, save_dvd_images
+from dvdsub import DvdSupParser, VobSubParser, detect_sup_type
 from engine import OCREngine, OCREngineType, create_ocr_engine, ocr_engine_type
 from ocr import OCR_Subtitles
-from pgs import PgsParser, save_pgs_images
-from utils import float_range
+from pgs import PgsParser, save_subtitle_images
+from utils import float_range, format_vsf_time, time_arg
 from vsf import VideoSubFinder
 
 
@@ -26,7 +26,8 @@ DEFAULT_OUTPUT_DIR = "outputs"             # Thư mục lưu phụ đề xuất 
 
 def create_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="A tool to OCR subtitles from video files, Blu-ray PGS (.sup), DVD-SUP (.sup), DVD VobSub (.sub/.idx), or extracted images using VideoSubFinder, Google Lens, and Bing OCR."
+        description="cloudocr-sub: OCR subtitles from video files, Blu-ray PGS (.sup), DVD-SUP (.sup), DVD VobSub (.sub/.idx), "
+        "or extracted images using VideoSubFinder, Google Lens, and Bing OCR."
     )
     parser.add_argument(
         "-o",
@@ -44,7 +45,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
         default=None,
         dest="output_subtitles",
         metavar="<outputname>",
-        help="Base name for output subtitle file (without extension). Default: output_subtitles",
+        help="Base name for output subtitle file (without extension). Default: input file name, or output_subtitles with --img_dir",
     )
 
     parser.add_argument(
@@ -72,14 +73,14 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--idx",
         type=str,
         default=None,
-        help="The path of DVD VobSub index file (.idx). Optional if located in the same directory as .sub.",
+        help="The path of DVD VobSub index file (.idx). Optional if it has the same name as the .sub.",
     )
 
     parser.add_argument(
         "--ifo",
         type=str,
         default=None,
-        help="The path of DVD IFO file (.ifo) for DVD-SUP palette. Optional if located in the same directory as .sup.",
+        help="The path of DVD IFO file (.ifo) for DVD-SUP palette. Optional if it has the same name as the .sup.",
     )
 
     parser.add_argument(
@@ -94,6 +95,25 @@ def create_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Only extract and OCR forced subtitles from PGS / DVD subtitle file. Default: False",
+    )
+
+    parser.add_argument(
+        "--start_time",
+        type=time_arg,
+        default=None,
+        metavar="TIME",
+        help="Only process subtitles from this time on (.sup / .sub / video). "
+        "Accepts seconds, M:SS, H:MM:SS, H:MM:SS.mmm or H:MM:SS:mmm. "
+        "Default: start of file (for video: from general.cfg).",
+    )
+
+    parser.add_argument(
+        "--end_time",
+        type=time_arg,
+        default=None,
+        metavar="TIME",
+        help="Only process subtitles up to this time (.sup / .sub / video). Same formats as --start_time. "
+        "Default: end of file (for video: from general.cfg).",
     )
 
     parser.add_argument(
@@ -159,6 +179,14 @@ def create_arg_parser() -> argparse.ArgumentParser:
         help=f"Enable local detection and preservation of italic text (e.g. {{\\i1}} in ASS, <i> in SRT). Default: {DEFAULT_DETECT_ITALIC}",
     )
 
+    ocr_group.add_argument(
+        "--ocr_cache",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Reuse OCR results from earlier runs (stored in .ocr_cache.json in the output folder), "
+        "so an interrupted or repeated run only sends new images. Default: True",
+    )
+
     vsf_param_group = parser.add_argument_group(title="VideoSubFinder")
     vsf_param_group.add_argument(
         "-vsf",
@@ -209,18 +237,6 @@ def create_arg_parser() -> argparse.ArgumentParser:
         action=BooleanOptionalAction,
         default=None,
         help="use cuda",
-    )
-    vsf_param_group.add_argument(
-        "--start_time",
-        type=str,
-        default=None,
-        help="start time, default = from general.cfg or video start (format hour:min:sec:millisec).",
-    )
-    vsf_param_group.add_argument(
-        "--end_time",
-        type=str,
-        default=None,
-        help="end time, default = from general.cfg or video end",
     )
     vsf_param_group.add_argument(
         "-te",
@@ -328,6 +344,19 @@ def create_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def filter_by_time(subtitles: list, start_ms: int | None = None, end_ms: int | None = None) -> list:
+    """Keeps subtitles that are on screen at some point between start_ms and end_ms."""
+    if start_ms is None and end_ms is None:
+        return subtitles
+    kept = [
+        s for s in subtitles
+        if (start_ms is None or s.end_ms > start_ms) and (end_ms is None or s.start_ms < end_ms)
+    ]
+    print(f"Time range {format_vsf_time(start_ms or 0)} - {format_vsf_time(end_ms) if end_ms is not None else 'end'}: "
+          f"{len(kept)} of {len(subtitles)} subtitles")
+    return kept
+
+
 def process_sup(
     sup_path: Path,
     output_dir: str,
@@ -336,8 +365,11 @@ def process_sup(
     lang: str = "vi",
     output_subtitles_name: str | None = None,
     font: str | None = None,
+    use_cache: bool = True,
     forced_only: bool = False,
     ifo_path: str | Path | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
 ):
     if not sup_path.is_file():
         raise FileNotFoundError(f"Subtitle file not found: {sup_path}")
@@ -349,27 +381,19 @@ def process_sup(
     if sup_type == "dvd":
         target_images_dir = save_dir / "DvdSup_Images"
         print(f"Detected DVD-SUP format in '{sup_path}'")
-        dvd_parser = DvdSupParser(sup_path, ifo_path=ifo_path)
-        subtitles = dvd_parser.parse(forced_only=forced_only)
-
-        if not subtitles:
-            print(f"No subtitle pictures found in {sup_path}")
-            return
-
-        print(f"Extracted {len(subtitles)} DVD subtitle pictures. Saving cropped images to {target_images_dir} ...")
-        save_dvd_images(subtitles, target_images_dir)
+        subtitles = DvdSupParser(sup_path, ifo_path=ifo_path).parse(forced_only=forced_only)
     else:
         target_images_dir = save_dir / "PGS_Images"
         print(f"Parsing Blu-ray PGS file '{sup_path}' ...")
-        pgs_parser = PgsParser(sup_path)
-        subtitles = pgs_parser.parse(forced_only=forced_only)
+        subtitles = PgsParser(sup_path).parse(forced_only=forced_only, range_start_ms=start_ms, range_end_ms=end_ms)
 
-        if not subtitles:
-            print(f"No subtitle pictures found in {sup_path}")
-            return
+    subtitles = filter_by_time(subtitles, start_ms, end_ms)
+    if not subtitles:
+        print(f"No subtitle pictures found in {sup_path}")
+        return
 
-        print(f"Extracted {len(subtitles)} subtitle pictures. Saving cropped images to {target_images_dir} ...")
-        save_pgs_images(subtitles, target_images_dir)
+    print(f"Extracted {len(subtitles)} subtitle pictures. Saving cropped images to {target_images_dir} ...")
+    save_subtitle_images(subtitles, target_images_dir)
 
     print(f"Running {ocr_engine.engine_name} on extracted images ...")
     ocr = OCR_Subtitles(
@@ -380,6 +404,7 @@ def process_sup(
         subtitle_format=subtitle_format,
         lang=lang,
         font=font,
+        use_cache=use_cache,
     )
     ocr()
 
@@ -393,8 +418,11 @@ def process_vobsub(
     lang: str = "vi",
     output_subtitles_name: str | None = None,
     font: str | None = None,
+    use_cache: bool = True,
     stream_id: int | None = None,
     forced_only: bool = False,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
 ):
     if not sub_path.is_file():
         raise FileNotFoundError(f"VobSub file not found: {sub_path}")
@@ -406,13 +434,14 @@ def process_vobsub(
     print(f"Parsing DVD VobSub file '{sub_path}' ...")
     parser = VobSubParser(sub_path, idx_path=idx_path)
     subtitles = parser.parse(stream_id=stream_id, lang_code=lang, forced_only=forced_only)
+    subtitles = filter_by_time(subtitles, start_ms, end_ms)
 
     if not subtitles:
         print(f"No subtitle pictures found in {sub_path}")
         return
 
     print(f"Extracted {len(subtitles)} VobSub subtitle pictures. Saving cropped images to {vobsub_images_dir} ...")
-    save_dvd_images(subtitles, vobsub_images_dir)
+    save_subtitle_images(subtitles, vobsub_images_dir)
 
     print(f"Running {ocr_engine.engine_name} on extracted VobSub images ...")
     ocr = OCR_Subtitles(
@@ -423,6 +452,7 @@ def process_vobsub(
         subtitle_format=subtitle_format,
         lang=lang,
         font=font,
+        use_cache=use_cache,
     )
     ocr()
 
@@ -436,9 +466,11 @@ def process_vsf(
     lang: str = "vi",
     output_subtitles_name: str | None = None,
     font: str | None = None,
+    use_cache: bool = True,
 ):
     print("Extracting subtitle images with VideoSubFinder (takes quite a long time) ...")
     video_num = len(video_list)
+    used_names: set[str] = set()
     for i, one_video in enumerate(video_list):
         print(f"[{i+1}/{video_num}] Starting to extract {one_video} key frame")
 
@@ -446,6 +478,15 @@ def process_vsf(
             save_name = Path(output_subtitles_name).stem
         else:
             save_name = Path(one_video).stem
+            # Same file name in different sub-folders: prefix the folder so outputs don't clobber each other
+            if save_name in used_names:
+                save_name = f"{Path(one_video).parent.name}_{save_name}"
+            counter = 1
+            base_name = save_name
+            while save_name in used_names:
+                save_name = f"{base_name}_{counter}"
+                counter += 1
+        used_names.add(save_name)
 
         save_dir = Path(output_dir) / save_name
         save_vsf_dir = save_dir / "VSF_Results"
@@ -470,6 +511,7 @@ def process_vsf(
             subtitle_format=subtitle_format,
             lang=lang,
             font=font,
+            use_cache=use_cache,
         )
         ocr()
 
@@ -478,11 +520,18 @@ def main():
     parser = create_arg_parser()
     args = parser.parse_args()
 
+    if args.start_time is not None and args.end_time is not None and args.start_time >= args.end_time:
+        parser.error("--start_time must be before --end_time")
+
     ocr_engine: OCREngine = create_ocr_engine(args.ocr_engine, args)
     output_dir: str = args.output_dir
 
     # 1. OCR from extracted images directory
     if args.img_dir:
+        if not Path(args.img_dir).is_dir():
+            parser.error(f"--img_dir '{args.img_dir}' is not an existing directory")
+        if args.start_time is not None or args.end_time is not None:
+            print("Note: --start_time / --end_time are ignored with --img_dir")
         subtitle_name = args.output_subtitles or "output_subtitles"
         ocr = OCR_Subtitles(
             output_subtitles_name=subtitle_name,
@@ -492,6 +541,7 @@ def main():
             subtitle_format=args.format,
             lang=args.lang,
             font=args.font,
+            use_cache=args.ocr_cache,
         )
         ocr()
         return
@@ -518,8 +568,11 @@ def main():
             lang=args.lang,
             output_subtitles_name=args.output_subtitles,
             font=args.font,
+            use_cache=args.ocr_cache,
             stream_id=args.stream_id,
             forced_only=args.forced_only,
+            start_ms=args.start_time,
+            end_ms=args.end_time,
         )
         return
 
@@ -536,8 +589,11 @@ def main():
             lang=args.lang,
             output_subtitles_name=args.output_subtitles,
             font=args.font,
+            use_cache=args.ocr_cache,
             forced_only=args.forced_only,
             ifo_path=args.ifo,
+            start_ms=args.start_time,
+            end_ms=args.end_time,
         )
         return
 
@@ -546,8 +602,12 @@ def main():
     if video_path is None:
         parser.error("--video_dir, --sup, --vobsub, or --img_dir is required")
 
-    video_formats = {".mp4", ".avi", ".mov", ".mkv"}
-    vsf = VideoSubFinder(**vars(args))
+    video_formats = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".flv", ".mpg", ".mpeg"}
+    vsf_args = vars(args).copy()
+    for key in ("start_time", "end_time"):
+        if vsf_args[key] is not None:
+            vsf_args[key] = format_vsf_time(vsf_args[key])
+    vsf = VideoSubFinder(**vsf_args)
 
     if Path(video_path).is_dir():
         video_list = [v.absolute() for v in Path(video_path).rglob("*.*") if v.suffix.lower() in video_formats]
@@ -567,6 +627,7 @@ def main():
         lang=args.lang,
         output_subtitles_name=args.output_subtitles,
         font=args.font,
+        use_cache=args.ocr_cache,
     )
     print("Done")
 

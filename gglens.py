@@ -86,15 +86,16 @@ class GoogleLens(OCREngine):
         img_gray = self.decode_grayscale(raw_bytes)
 
         all_lines = []
-        para_texts = []
+        para_lines_list = []
         for p in paragraphs:
-            para_words = []
+            para_lines = []
             for l in p.lines:
+                # proto3 floats have no presence: an absent box reads as all zeros
                 box = l.geometry.bounding_box
-                cy = box.center_y if box.center_y is not None else 0.5
-                cx = box.center_x if box.center_x is not None else 0.5
-                bw = box.width if box.width is not None else 0.1
-                bh = box.height if box.height is not None else 0.1
+                if box.width > 0 and box.height > 0:
+                    cy, cx, bw, bh = box.center_y, box.center_x, box.width, box.height
+                else:
+                    cy, cx, bw, bh = 0.5, 0.5, 0.1, 0.1
 
                 line_str = "".join(
                     (w.plain_text or "") + (w.text_separator or "")
@@ -103,7 +104,6 @@ class GoogleLens(OCREngine):
                 if not line_str:
                     continue
 
-                para_words.append(line_str)
                 is_ita = False
                 if img_gray is not None:
                     x1 = int(max(0, (cx - bw / 2) * width))
@@ -112,9 +112,11 @@ class GoogleLens(OCREngine):
                     y2 = int(min(height, (cy + bh / 2) * height))
                     is_ita = check_italic_patch(img_gray, x1, y1, x2, y2)
 
-                all_lines.append({"text": line_str, "cy": cy, "cx": cx, "h": bh, "is_italic": is_ita})
+                line = {"text": line_str, "cy": cy, "cx": cx, "h": bh, "is_italic": is_ita}
+                all_lines.append(line)
+                para_lines.append(line)
 
-            if para_words:
-                para_texts.append(" ".join(para_words))
+            if para_lines:
+                para_lines_list.append(para_lines)
 
-        return self.format_recognized_text(all_lines, para_texts)
+        return self.format_recognized_text(all_lines, para_lines_list)
