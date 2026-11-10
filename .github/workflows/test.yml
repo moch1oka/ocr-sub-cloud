@@ -11,7 +11,10 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"  # Windows runners default to a legacy code page; the checks print Vietnamese text
     strategy:
+      fail-fast: false  # the OCR steps talk to live services; one flaky cell shouldn't cancel the rest
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13"]
@@ -63,5 +66,7 @@ jobs:
       - name: Run OCR test (Bing OCR)
         run: python run.py --img_dir test --ocr_engine bing -o outputs_bing
 
+      # Bing often turns away requests from CI servers. Its answer parsing is covered by the offline
+      # tests, so here "no result at all" is only a warning; a wrong or partial result still fails.
       - name: Check Bing output
-        run: python tests/check_output.py outputs_bing/output_subtitles.ass
+        run: python tests/check_output.py --allow-refused outputs_bing/output_subtitles.ass
