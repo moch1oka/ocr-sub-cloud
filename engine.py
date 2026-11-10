@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import argparse
+from collections import Counter
 import concurrent.futures
 from enum import Enum
 from pathlib import Path
@@ -201,6 +202,32 @@ class OCREngine(ABC):
         self.lang_cfg: LanguageConfig = get_language_config(lang)
         self.scan_lock = Lock()
         self.console = Console()
+        self._failures: Counter[str] = Counter()
+        self._soft_failures: Counter[str] = Counter()
+
+    def note_failure(self, reason: str, soft: bool = False) -> None:
+        """
+        Records why an image came back without text, for the summary printed after the run.
+        soft=True is for answers that are also normal for an image with no text in it; they are
+        only reported when every image of the run got them (a sign the service is refusing us).
+        """
+        with self.scan_lock:
+            (self._soft_failures if soft else self._failures)[reason] += 1
+
+    def _report_failures(self, images_sent: int) -> None:
+        failures = dict(self._failures)
+        for reason, count in self._soft_failures.items():
+            if images_sent >= 3 and count == images_sent:
+                failures[reason] = count
+        if not failures:
+            return
+        details = ", ".join(f"{reason} ({count})" for reason, count in sorted(failures.items(), key=lambda kv: -kv[1]))
+        self.console.print(f"[yellow]{self.engine_name}: {sum(failures.values())} of {images_sent} images failed: {details}[/yellow]")
+        if sum(failures.values()) == images_sent:
+            self.console.print(
+                f"[yellow]Every image failed, so {self.engine_name} is probably refusing requests from this "
+                "network (common on servers / VPNs) or its API changed. Try the other --ocr_engine.[/yellow]"
+            )
 
     def get_session(self) -> requests.Session:
         """Returns a thread-local curl_cffi session impersonating Chrome with HTTP/1.1."""
@@ -335,12 +362,15 @@ class OCREngine(ABC):
             if results:
                 self.console.print(f"Reusing {len(results)} cached OCR results, {len(todo)} images left")
 
+        self._failures.clear()
+        self._soft_failures.clear()
         try:
             if todo:
                 self._run_images({img_path: names[img_path] for img_path in todo}, results, cache, keys)
         finally:
             if cache:
                 cache.save()
+        self._report_failures(len(todo))
 
         return dict(sorted(results.items(), key=timecode_key))
 

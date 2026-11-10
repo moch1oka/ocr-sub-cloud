@@ -1,6 +1,7 @@
 """Offline unit tests (no network). Run with: python -m unittest discover -s tests"""
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -10,9 +11,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image
+from rich.console import Console
 
-from dvdsub import DvdSubtitle, IdxParser, VobSubParser
 from ass import format_ass_dialogue
+from bing import BingOCR
+from dvdsub import DvdSubtitle, IdxParser, VobSubParser
 from engine import OCREngine
 from ocr import OCR_Subtitles, should_merge_subtitles
 from pgs import PgsParser, save_subtitle_images
@@ -233,6 +236,69 @@ class OcrRunTest(unittest.TestCase):
             srt = (out / "sub.srt").read_text(encoding="utf-8")
         self.assertEqual([Path(p).name for p in report], self.NAMES[1:])
         self.assertIn("One", srt)
+
+
+class BingParsingTest(unittest.TestCase):
+    """Bing's answers are parsed offline here, because the live service often refuses CI servers."""
+
+    def test_token_from_upload_redirect(self):
+        get = BingOCR.extract_insights_token
+        self.assertEqual(get("/images/search?view=detailV2&insightsToken=bcid_Ab*c-1&iss=sbi"), "bcid_Ab*c-1")
+        self.assertEqual(get("https://www.bing.com/images/search?insightstoken=bcid_x%2A1&mkt=en-US"), "bcid_x%2A1")
+        self.assertEqual(get("/fd/ls/consent?ru=%2Fimages%2Fsearch"), "")
+        self.assertEqual(get(""), "")
+
+    def test_real_knowledge_answer(self):
+        data = json.loads((Path(__file__).parent / "fixtures" / "bing_knowledge.json").read_text(encoding="utf-8"))
+        self.assertEqual(BingOCR().parse_knowledge_response(data, 462, 164), "Không lẽ em đi lạc hả?")
+
+    def test_two_rows_and_pixel_coordinates(self):
+        def line(text, x1, y1, x2, y2):
+            box = {"topLeft": {"x": x1, "y": y1}, "topRight": {"x": x2, "y": y1},
+                   "bottomRight": {"x": x2, "y": y2}, "bottomLeft": {"x": x1, "y": y2}}
+            return {"text": text, "boundingBox": box}
+
+        lines = [line("second row", 10, 60, 190, 90), line("first", 10, 10, 90, 40), line("row", 100, 10, 190, 40)]
+        data = {"tags": [{"displayName": "##TextRecognition", "actions": [
+            {"_type": "ImageKnowledge/TextRecognitionAction", "data": {"regions": [{"lines": lines}]}}]}]}
+        self.assertEqual(BingOCR().parse_knowledge_response(data, 200, 100), "first row\nsecond row")
+
+    def test_answer_without_ocr_is_empty_and_noted(self):
+        engine = BingOCR()
+        self.assertEqual(engine.parse_knowledge_response({"tags": [{"displayName": "", "actions": []}]}, 100, 100), "")
+        self.assertEqual(sum(engine._soft_failures.values()), 1)
+
+
+class FailureSummaryTest(unittest.TestCase):
+    def _run(self, engine_cls, count=3):
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(count):
+                Image.new("RGB", (60, 60), (i * 40, 0, 0)).save(Path(d) / f"0_00_0{i}_000__0_00_0{i}_500.png")
+            engine = engine_cls()
+            buffer = io.StringIO()
+            engine.console = Console(file=buffer, width=300)
+            engine(Path(d))
+            return buffer.getvalue()
+
+    def test_says_why_when_every_image_fails(self):
+        class Blocked(_FakeEngine):
+            def process_image(self, img_path: str) -> str:
+                self.note_failure("upload gave no image token (redirected to www.bing.com/consent)")
+                return ""
+
+        output = self._run(Blocked)
+        self.assertIn("3 of 3 images failed: upload gave no image token", output)
+        self.assertIn("Try the other --ocr_engine", output)
+
+    def test_a_few_images_without_text_are_not_a_failure(self):
+        class OneEmpty(_FakeEngine):
+            def process_image(self, img_path: str) -> str:
+                if "0_00_00" in img_path:
+                    self.note_failure("answer had no text", soft=True)
+                    return ""
+                return "text"
+
+        self.assertNotIn("failed", self._run(OneEmpty))
 
 
 class AssTest(unittest.TestCase):

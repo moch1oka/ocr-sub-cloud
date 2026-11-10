@@ -70,7 +70,8 @@ class GoogleLens(OCREngine):
             error_context=img_path,
         )
 
-        if res is None or res.status_code != 200:
+        if res is None:
+            self.note_failure("request failed")
             return ""
 
         try:
@@ -78,9 +79,12 @@ class GoogleLens(OCREngine):
             response_proto.ParseFromString(res.content)
             paragraphs = response_proto.objects_response.text.text_layout.paragraphs
             if not paragraphs:
+                # Also what an image without any text gives
+                self.note_failure("answer had no text", soft=True)
                 return ""
         except Exception as e:
             self.console.log(f"[yellow]Protobuf parse error for {img_path}: {e}[/yellow]")
+            self.note_failure("answer could not be read")
             return ""
 
         img_gray = self.decode_grayscale(raw_bytes)

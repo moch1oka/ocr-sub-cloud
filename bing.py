@@ -54,14 +54,17 @@ class BingOCR(OCREngine):
             mp1.close()
 
         if not r1:
+            self.note_failure("image upload failed")
             return ""
 
         loc = r1.headers.get("Location", "")
-        if "insightsToken=" not in loc:
+        token = self.extract_insights_token(loc)
+        parsed = urlparse(loc)
+        if not token:
+            # Typically a consent / verification page instead of the result page
+            self.note_failure(f"upload gave no image token (redirected to {parsed.netloc}{parsed.path or '?'})")
             return ""
 
-        token = loc.split("insightsToken=")[1].split("&")[0]
-        parsed = urlparse(loc)
         api_host = parsed.netloc if parsed.netloc else "www.bing.com"
 
         # Step 2: Request OCR knowledge action
@@ -98,27 +101,42 @@ class BingOCR(OCREngine):
             mp2.close()
 
         if not r2:
+            self.note_failure("OCR request failed")
             return ""
 
         try:
             data = r2.json()
         except Exception:
+            self.note_failure("OCR answer was not JSON")
             return ""
 
-        # Step 3: Parse text and bounding boxes from OCR action
+        return self.parse_knowledge_response(data, width, height, self.decode_grayscale(raw_bytes))
+
+    @staticmethod
+    def extract_insights_token(location: str) -> str:
+        """Reads the insightsToken query parameter of the upload redirect (any letter case)."""
+        for part in urlparse(location).query.split("&"):
+            key, _, value = part.partition("=")
+            if key.lower() == "insightstoken":
+                return value  # kept as sent (not URL-decoded): it goes back to Bing unchanged
+        return ""
+
+    def parse_knowledge_response(self, data: dict, width: int, height: int, img_gray=None) -> str:
+        """Step 3: turns Bing's knowledge JSON into text, using the line boxes for layout and italics."""
+        ocr_tag = next((t for t in data.get("tags", []) if t.get("displayName") == "##TextRecognition"), None)
+        if ocr_tag is None:
+            # Also what an image without any text gives; only suspicious when every image does it
+            self.note_failure("answer had no text recognition", soft=True)
+            return ""
+
         regions = []
-        for tag in data.get("tags", []):
-            if tag.get("displayName") == "##TextRecognition":
-                for action in tag.get("actions", []):
-                    if action.get("_type") == "ImageKnowledge/TextRecognitionAction":
-                        regions = action.get("data", {}).get("regions", [])
-                        break
+        for action in ocr_tag.get("actions", []):
+            if action.get("_type") == "ImageKnowledge/TextRecognitionAction":
+                regions = action.get("data", {}).get("regions", [])
                 break
 
         if not regions:
             return ""
-
-        img_gray = self.decode_grayscale(raw_bytes)
 
         corners = ("topLeft", "topRight", "bottomRight", "bottomLeft")
         all_lines = []

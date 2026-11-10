@@ -1,0 +1,124 @@
+{
+ "_type": "ImageKnowledge",
+ "tags": [
+  {
+   "displayName": "",
+   "actions": []
+  },
+  {
+   "displayName": "##TextRecognition",
+   "boundingBox": {
+    "queryRectangle": {
+     "topLeft": {
+      "x": 0,
+      "y": 0
+     },
+     "topRight": {
+      "x": 1,
+      "y": 0
+     },
+     "bottomRight": {
+      "x": 1,
+      "y": 1
+     },
+     "bottomLeft": {
+      "x": 0,
+      "y": 1
+     }
+    },
+    "displayRectangle": {
+     "topLeft": {
+      "x": 0,
+      "y": 0
+     },
+     "topRight": {
+      "x": 1,
+      "y": 0
+     },
+     "bottomRight": {
+      "x": 1,
+      "y": 1
+     },
+     "bottomLeft": {
+      "x": 0,
+      "y": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "_type": "ImageKnowledge/TextRecognitionAction",
+     "actionType": "TextRecognition",
+     "data": {
+      "regions": [
+       {
+        "boundingBox": {
+         "topLeft": {
+          "x": 0.04761905,
+          "y": 0.6707317
+         },
+         "topRight": {
+          "x": 0.94372296,
+          "y": 0.6707317
+         },
+         "bottomRight": {
+          "x": 0.94372296,
+          "y": 0.94512194
+         },
+         "bottomLeft": {
+          "x": 0.04761905,
+          "y": 0.94512194
+         }
+        },
+        "lines": [
+         {
+          "text": "Không lẽ em đi lạc hả?",
+          "boundingBox": {
+           "topLeft": {
+            "x": 0.04761905,
+            "y": 0.6768293
+           },
+           "topRight": {
+            "x": 0.94372296,
+            "y": 0.6707317
+           },
+           "bottomRight": {
+            "x": 0.94372296,
+            "y": 0.93292683
+           },
+           "bottomLeft": {
+            "x": 0.04761905,
+            "y": 0.94512194
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "boundingBox": {
+       "topLeft": {
+        "x": 0.04761905,
+        "y": 0.6707317
+       },
+       "topRight": {
+        "x": 0.94372296,
+        "y": 0.6707317
+       },
+       "bottomRight": {
+        "x": 0.94372296,
+        "y": 0.94512194
+       },
+       "bottomLeft": {
+        "x": 0.04761905,
+        "y": 0.94512194
+       }
+      }
+     }
+    }
+   ],
+   "sources": [
+    "OCR"
+   ]
+  }
+ ]
+}
