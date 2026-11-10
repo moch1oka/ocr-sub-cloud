@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -41,6 +42,14 @@ class TextCleanupTest(unittest.TestCase):
         self.assertEqual(text_cleanup("♪ La la la ♪", "vi"), "♪ La la la ♪")
         self.assertEqual(text_cleanup("Tom & Jerry #1", "en"), "Tom & Jerry #1")
         self.assertIn("♪", text_cleanup("♪ 歌 ♪", "ja"))
+
+    def test_dashes_and_symbols_are_kept(self):
+        self.assertEqual(text_cleanup("– Anh đi đâu? – Về nhà.", "vi"), "– Anh đi đâu? – Về nhà.")
+        self.assertEqual(text_cleanup("Wait—what? £50, 20°C", "en"), "Wait—what? £50, 20°C")
+        self.assertEqual(text_cleanup("それは――つまり※注意→★♥", "ja"), "それは――つまり※注意→★♥")
+
+    def test_dot_inside_uppercase_abbreviation(self):
+        self.assertEqual(text_cleanup("Ở TP.HCM và Q.1", "vi"), "Ở TP.HCM và Q.1")
 
     def test_italic_tags_and_line_breaks(self):
         self.assertEqual(text_cleanup("{\\i1}Hello{\\i0}\nWorld", "en"), "{\\i1}Hello{\\i0}\\NWorld")
@@ -113,6 +122,15 @@ class MergeTest(unittest.TestCase):
 
     def test_no_merge_after_gap(self):
         self.assertFalse(should_merge_subtitles("Anh đi đâu?", "Anh đi đâu?", 1500)[0])
+
+    def test_fuzzy_merge_joins_ocr_variants_of_one_hardsub_line(self):
+        self.assertTrue(should_merge_subtitles("Anh đi đâu đó?", "Anh đi đâu đó", 40)[0])
+
+    def test_authored_subtitles_only_merge_identical_back_to_back(self):
+        # Real case from a VobSub: two different lines 141 ms apart
+        self.assertFalse(should_merge_subtitles("こっちか?", "こっちかな?", 141, lang="ja", fuzzy=False)[0])
+        self.assertFalse(should_merge_subtitles("はい", "はい", 141, lang="ja", fuzzy=False)[0])
+        self.assertTrue(should_merge_subtitles("はい", "はい", 0, lang="ja", fuzzy=False)[0])  # e.g. fade steps
 
 
 class _FakeEngine(OCREngine):
@@ -188,6 +206,23 @@ class OcrRunTest(unittest.TestCase):
             OCR_Subtitles("sub", out, images, no_cache, subtitle_format="srt", use_cache=False)()
             self.assertEqual(len(no_cache.calls), 3)
 
+    def test_same_name_in_sub_folders_and_broken_cache_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            images, out = Path(d) / "imgs", Path(d) / "out"
+            for i, sub in enumerate(("a", "b")):
+                (images / sub).mkdir(parents=True)
+                Image.new("RGB", (60, 60), (i * 90, 0, 0)).save(images / sub / self.NAMES[0])
+            out.mkdir()
+            (out / ".ocr_cache.json").write_text("[not a cache", encoding="utf-8")
+
+            engine = _CountingEngine({self.NAMES[0]: "One"})
+            results = engine(images, cache_path=out / ".ocr_cache.json")
+            self.assertEqual(sorted(results), [f"a/{self.NAMES[0]}", f"b/{self.NAMES[0]}"])
+
+            again = _CountingEngine({self.NAMES[0]: "One"})
+            again(images, cache_path=out / ".ocr_cache.json")
+            self.assertEqual(again.calls, [])  # the broken file was replaced by a working cache
+
     def test_images_without_text_are_reported(self):
         with tempfile.TemporaryDirectory() as d:
             images, out = Path(d) / "imgs", Path(d) / "out"
@@ -232,6 +267,22 @@ class VsfArgsTest(unittest.TestCase):
         run_list = self._run_list()
         self.assertIn("--open_video_opencv", run_list)
         self.assertNotIn("--open_video_ffmpeg", run_list)
+
+    def test_relative_paths_are_made_absolute_for_vsf(self):
+        args = create_arg_parser().parse_args(["-i", "x.mp4", "-vsf", sys.executable])
+        vsf = VideoSubFinder(**vars(args))
+        with mock.patch("vsf.subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+            vsf("ep01.mkv", Path("outputs") / "ep01" / "VSF_Results")
+        cmd = run.call_args.args[0]
+        video, out_dir = cmd[cmd.index("--input_video") + 1], cmd[cmd.index("--output_dir") + 1]
+        self.assertEqual(Path(video), Path.cwd() / "ep01.mkv")
+        self.assertEqual(Path(out_dir), Path.cwd() / "outputs" / "ep01" / "VSF_Results")
+
+    def test_thread_count_must_be_positive(self):
+        self.assertEqual(create_arg_parser().parse_args(["-i", "x.mp4"]).gglens_thread, 16)
+        self.assertEqual(create_arg_parser().parse_args(["-i", "x.mp4"]).bing_thread, 16)
+        with self.assertRaises(SystemExit):
+            create_arg_parser().parse_args(["-i", "x.mp4", "--gglens_thread", "0"])
 
     def test_ffmpeg_flag(self):
         run_list = self._run_list("--open_video_ffmpeg")

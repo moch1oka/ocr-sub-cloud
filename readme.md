@@ -75,7 +75,7 @@ Files whose names don't follow this pattern are skipped.
 ## Things worth knowing
 
 - **Language (`-l`)** controls a few things: the language hint sent to the OCR service, which characters survive cleanup, the default ASS font (Arial for `vi`/`en`, Meiryo for `ja`, Microsoft YaHei for `zh`), and how aggressively near-identical neighbouring lines are merged. For `ja`/`zh` it also removes the stray spaces OCR puts between CJK characters. For VobSub it's also used to pick the stream when `--stream_id` isn't given.
-- **Merging:** consecutive images with the same (or almost the same) text and less than 1 s between them become one subtitle line. This is what turns VideoSubFinder's many frames per line into a single entry.
+- **Merging:** for video and `--img_dir`, consecutive images with the same (or almost the same) text and less than 1 s between them become one subtitle line. This is what turns VideoSubFinder's many frames per line into a single entry. For `.sup` and `.sub`, every picture is already one line, so only back-to-back pictures with identical text are merged.
 - **Top/bottom:** subtitles in the upper 35% of the screen get the `Top` style in ASS and `{\an8}` in SRT. In PGS, a top sign and a bottom line shown at the same time become two separate entries.
 - **Italics (`--detect_italic`)** are guessed locally from the slant of each text line, since neither OCR service reports font style. Off by default; check the results.
 - **Line breaks (`--line_break_mode`):** `y_cluster` (default) groups the recognized lines into rows by their vertical position; `line` keeps every line the OCR service returns; `paragraph` joins each paragraph into one line.
@@ -106,8 +106,8 @@ OCR:
 | Option | Default | |
 |---|---|---|
 | `--ocr_engine` | `gglens` | `gglens` or `bing` |
-| `--gglens_thread` | 32 | Parallel requests to Google Lens |
-| `--bing_thread` | 32 | Parallel requests to Bing |
+| `--gglens_thread` | 16 | Parallel requests to Google Lens. More is faster but more likely to be rate limited |
+| `--bing_thread` | 16 | Parallel requests to Bing |
 | `--line_break_mode` | `y_cluster` | `y_cluster`, `line`, `paragraph` |
 | `--detect_italic` | off | |
 | `--[no-]ocr_cache` | on | Reuse results of earlier runs |

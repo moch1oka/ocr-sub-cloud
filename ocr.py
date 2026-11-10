@@ -25,6 +25,10 @@ class SubtitleItem:
         return format_srt_block(self.start_ms, self.end_ms, self.text_content, index, self.is_top)
 
 
+# Without fuzzy merging, pictures must follow each other this closely to count as the same line
+EXACT_MERGE_MAX_GAP_MS = 100
+
+
 def _strip_tags(text: str) -> str:
     """Strips ASS and SRT formatting tags for pure text comparison."""
     return re.sub(r"\{\\[^}]*\}|<[^>]*>", "", text)
@@ -42,14 +46,19 @@ def _pick_best(prev: str, curr: str) -> str:
 
 
 def should_merge_subtitles(
-    prev_text: str, curr_text: str, gap_ms: int, lang: str = "vi"
+    prev_text: str, curr_text: str, gap_ms: int, lang: str = "vi", fuzzy: bool = True
 ) -> tuple[bool, str]:
     """
     Determines if two consecutive subtitle entries should be merged into one.
     Handles identical matches, substring overlaps, and fuzzy similarity based on language preset.
+
+    fuzzy=True is for hardsub frames, where one line is seen many times with small OCR differences.
+    fuzzy=False is for authored subtitles (PGS / DVD), where every picture is its own line: only
+    back-to-back pictures with the same text (e.g. fade steps) are merged, so two different lines
+    that look alike ("Here?" / "Here, maybe?") stay separate.
     Returns (should_merge, best_text).
     """
-    if gap_ms > 1000:
+    if gap_ms > (1000 if fuzzy else EXACT_MERGE_MAX_GAP_MS):
         return False, ""
 
     p = prev_text.strip()
@@ -69,6 +78,9 @@ def should_merge_subtitles(
 
     if p_lower == c_lower:
         return True, _pick_best(p, c)
+
+    if not fuzzy:
+        return False, ""
 
     cfg = get_language_config(lang)
     max_len_diff = 2 if cfg.cjk_mode else 3
@@ -110,9 +122,11 @@ class OCR_Subtitles:
         lang: str = "vi",
         font: str | None = None,
         use_cache: bool = True,
+        fuzzy_merge: bool = True,
     ) -> None:
         self.sub_items: dict[str, SubtitleItem] = {}
         self.empty_images: list[str] = []
+        self.fuzzy_merge = fuzzy_merge
         self.ocr_engine = ocr_engine
         self.subtitle_format = subtitle_format.lower()
         self.lang = lang
@@ -248,7 +262,7 @@ class OCR_Subtitles:
 
             gap_ms = item.start_ms - previous_sub.end_ms
             should_merge, best_text = should_merge_subtitles(
-                previous_sub.text_content, item.text_content, gap_ms, lang=self.lang
+                previous_sub.text_content, item.text_content, gap_ms, lang=self.lang, fuzzy=self.fuzzy_merge
             )
 
             if should_merge:

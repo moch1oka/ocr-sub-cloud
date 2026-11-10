@@ -189,7 +189,7 @@ class OCREngine(ABC):
 
     def __init__(
         self,
-        threads: int = 32,
+        threads: int = 16,
         line_break_mode: str = "y_cluster",
         lang: str = "vi",
         detect_italic: bool = False,
@@ -307,11 +307,16 @@ class OCREngine(ABC):
         With cache_path, results of earlier runs are reused and new ones are stored there.
         Returns a sorted dictionary mapping image filename to recognized text.
         """
+        images_dir = Path(images_dir)
         images = collect_images(images_dir)
 
         if not images:
             self.console.print(f"[yellow]No images found in {images_dir}[/yellow]")
             return {}
+
+        # Images are identified by their path inside images_dir, so the same file name
+        # in two sub-folders gives two results instead of one overwriting the other
+        names = {img_path: img_path.relative_to(images_dir).as_posix() for img_path in images}
 
         results: Dict[str, str] = {}
         cache = OcrCache(cache_path, self.cache_signature) if cache_path else None
@@ -320,10 +325,11 @@ class OCREngine(ABC):
         if cache:
             todo = []
             for img_path in images:
-                keys[img_path.name] = OcrCache.image_key(img_path)
-                cached = cache.get(keys[img_path.name])
+                name = names[img_path]
+                keys[name] = OcrCache.image_key(img_path)
+                cached = cache.get(keys[name])
                 if cached is not None:
-                    results[img_path.name] = cached
+                    results[name] = cached
                 else:
                     todo.append(img_path)
             if results:
@@ -331,7 +337,7 @@ class OCREngine(ABC):
 
         try:
             if todo:
-                self._run_images(todo, results, cache, keys)
+                self._run_images({img_path: names[img_path] for img_path in todo}, results, cache, keys)
         finally:
             if cache:
                 cache.save()
@@ -340,11 +346,12 @@ class OCREngine(ABC):
 
     def _run_images(
         self,
-        images: List[Path],
+        images: Dict[Path, str],
         results: Dict[str, str],
         cache: OcrCache | None,
         keys: Dict[str, str],
     ) -> None:
+        """OCRs images (path -> result name) in a thread pool, filling results and the cache."""
         with Progress(
             TextColumn(f"[progress.description]{{task.description}} ({self.engine_name})"),
             BarColumn(),
@@ -359,8 +366,8 @@ class OCREngine(ABC):
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.threads)
             try:
                 future_to_image = {
-                    executor.submit(self.process_image, str(img_path)): img_path.name
-                    for img_path in images
+                    executor.submit(self.process_image, str(img_path)): name
+                    for img_path, name in images.items()
                 }
 
                 for future in concurrent.futures.as_completed(future_to_image):
@@ -415,7 +422,7 @@ def create_ocr_engine(ocr_engine_type: OCREngineType, args: Any) -> OCREngine:
     if ocr_engine_type == OCREngineType.GGLENS:
         from gglens import GoogleLens
 
-        threads = getattr(args, "gglens_thread", 32)
+        threads = getattr(args, "gglens_thread", 16)
         return GoogleLens(
             threads=threads,
             line_break_mode=line_break_mode,
@@ -426,7 +433,7 @@ def create_ocr_engine(ocr_engine_type: OCREngineType, args: Any) -> OCREngine:
     elif ocr_engine_type == OCREngineType.BING:
         from bing import BingOCR
 
-        threads = getattr(args, "bing_thread", 32)
+        threads = getattr(args, "bing_thread", 16)
         return BingOCR(
             threads=threads,
             line_break_mode=line_break_mode,

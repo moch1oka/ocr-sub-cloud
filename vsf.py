@@ -82,7 +82,7 @@ class VideoSubFinder:
         if use_cuda:
             run_list.append("--use_cuda")
         if general_settings:
-            run_list.extend(["--general_settings", general_settings])
+            run_list.extend(["--general_settings", str(Path(general_settings).resolve())])
 
         # CLI overrides (only added if user explicitly specified a non-None value)
         cli_overrides = {
@@ -119,6 +119,10 @@ class VideoSubFinder:
         self.run_list = run_list
 
     def __call__(self, video_path: str | Path, output_dir: str | Path):
+        # VideoSubFinder runs with its own folder as working directory, so relative paths
+        # (the default "-o outputs", "-i ep01.mkv") must be made absolute first
+        video_path = Path(video_path).resolve()
+        output_dir = Path(output_dir).resolve()
         cmd = list(self.run_list) + ["--input_video", str(video_path), "--output_dir", str(output_dir)]
         exe_dir = str(Path(self.exe_path).resolve().parent)
 

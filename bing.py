@@ -11,7 +11,7 @@ from utils import get_image_raw_bytes_and_dims
 class BingOCR(OCREngine):
     def __init__(
         self,
-        threads: int = 32,
+        threads: int = 16,
         line_break_mode: str = "y_cluster",
         lang: str = "vi",
         detect_italic: bool = False,

@@ -353,7 +353,8 @@ class DvdSpu:
 
         # Crop tightly around text, then composite onto black for maximum contrast with OCR engines
         bg = flatten_on_black(crop_subtitle_image(raw_img, padding=10))
-        if bg.convert("L").getextrema()[0] == bg.convert("L").getextrema()[1]:
+        darkest, brightest = bg.convert("L").getextrema()
+        if darkest == brightest:
             return None
 
         # Determine end time
@@ -585,7 +586,7 @@ class VobSubParser:
         with open(self.sub_path, "rb") as f:
             file_size = self.sub_path.stat().st_size
 
-            for entry_idx, (start_ms, filepos, entry_stream) in enumerate(self.idx.entries):
+            for start_ms, filepos, entry_stream in self.idx.entries:
                 if entry_stream != target_stream:
                     continue
                 if filepos >= file_size:

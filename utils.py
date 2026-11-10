@@ -30,10 +30,16 @@ SINGLE_QUOTE_REGEX = re.compile("|".join(["‘", "‛", "’", "❛", "❜", "`"
 
 CJK_CHAR_REGEX = r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
 
+# Kept by the cleanup whitelists in every language (written for use inside a regex character class):
+# dashes (\u2010 \u2011 \u2012 \u2013 \u2014 \u2015, e.g. speaker dashes), two-dot leader, and symbols that carry meaning in subtitles
+EXTRA_SYMBOLS_CLASS = r"\u2010-\u2015\u2025\u2665\u2661\u2605\u2606\u203b\u2192\u2190\u2191\u2193\u00b0\u00a3\u20ac\u00a5\u00a2\u00a1\u00bf\u00a7\u00bd\u00bc\u00be"
+
 
 def _space_after_sentence_dot(m: re.Match) -> str:
+    # "xin chào.Bạn" -> sentence end; "TP.HCM", "www.google.com", "e.g." -> leave alone
+    prev_char = m.string[m.start() - 1]
     next_char = m.string[m.end()]
-    return ". " if next_char.isupper() else "."
+    return ". " if prev_char.islower() and next_char.isupper() else "."
 
 
 def apply_punctuation_and_spacing(text: str) -> str:
@@ -118,7 +124,7 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
             r"\uF900-\uFAFF"  # CJK Compatibility
             r"\uFF00-\uFFEF"  # Halfwidth & Fullwidth Forms
             r"!\[\]_\$ /\\:\'\" ,.\?;\-+=()*%@~…{}&#<>♪♫"
-            r"]"
+            rf"{EXTRA_SYMBOLS_CLASS}]"
         )
         text = re.sub(pattern, "", text)
 
@@ -134,7 +140,7 @@ def text_cleanup(text: str, lang: str = "vi") -> str:
             r"\u0180-\u024F"  # Latin Extended-B (ư, ơ)
             r"\u1E00-\u1EFF"  # Latin Extended Additional (accented letters)
             r"0-9"
-            rf"{re.escape(allowed_special_chars)}]"
+            rf"{re.escape(allowed_special_chars)}{EXTRA_SYMBOLS_CLASS}]"
         )
         text = re.sub(pattern, "", text)
 
@@ -206,6 +212,10 @@ def get_image_raw_bytes_and_dims(
                 border = (pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2)
                 img = ImageOps.expand(img, border=border, fill=img.getpixel((0, 0)))
                 w, h = img.size
+
+            # 16-bit, float, CMYK... -> something both PNG and JPEG can hold
+            if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+                img = img.convert("RGB")
 
             buf = io.BytesIO()
             if img.mode in ("RGBA", "LA", "P"):
@@ -315,10 +325,14 @@ class OcrCache:
         self.signature = signature
         self._lock = threading.Lock()
         self._dirty = 0
+        self._write_failed = False
+        self._data: dict[str, dict[str, str]] = {}
         try:
-            self._data: dict[str, dict[str, str]] = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            self._data = {}
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                self._data = {k: v for k, v in loaded.items() if isinstance(v, dict)}
+        except (OSError, ValueError):
+            pass  # missing or unreadable cache: start empty
         self._entries = self._data.setdefault(signature, {})
 
     @staticmethod
@@ -343,11 +357,18 @@ class OcrCache:
                 self._save_locked()
 
     def _save_locked(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self.path)
         self._dirty = 0
+        if self._write_failed:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            # The cache is a convenience: never let it stop the OCR run
+            self._write_failed = True
+            print(f"Warning: could not write OCR cache {self.path}: {exc}")
 
 
 def collect_images(images_dir: Path | str) -> List[Path]:
@@ -406,6 +427,17 @@ def format_vsf_time(ms: int) -> str:
     m, rest = divmod(rest, 60000)
     s, ms = divmod(rest, 1000)
     return f"{h}:{m:02d}:{s:02d}:{ms:03d}"
+
+
+def positive_int(value: str) -> int:
+    """ArgumentParser type for whole numbers >= 1 (thread counts)."""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a whole number") from exc
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
 
 
 def float_range(mini: float, maxi: float) -> Callable[..., float]:

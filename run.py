@@ -6,7 +6,7 @@ from dvdsub import DvdSupParser, VobSubParser, detect_sup_type
 from engine import OCREngine, OCREngineType, create_ocr_engine, ocr_engine_type
 from ocr import OCR_Subtitles
 from pgs import PgsParser, save_subtitle_images
-from utils import float_range, format_vsf_time, time_arg
+from utils import float_range, format_vsf_time, positive_int, time_arg
 from vsf import VideoSubFinder
 
 
@@ -14,8 +14,8 @@ from vsf import VideoSubFinder
 # DEFAULT SETTINGS (TÙY CHỈNH MẶC ĐỊNH TẠI ĐÂY)
 # ==============================================================================
 DEFAULT_OCR_ENGINE = OCREngineType.GGLENS  # OCREngineType.GGLENS hoặc OCREngineType.BING
-DEFAULT_GGLENS_THREAD = 32                 # Số luồng Google Lens (khuyên dùng: 32 - 80)
-DEFAULT_BING_THREAD = 32                   # Số luồng Bing OCR (khuyên dùng: 16 - 48)
+DEFAULT_GGLENS_THREAD = 16                 # Số luồng Google Lens (tăng lên 32 - 80 nếu cần nhanh hơn)
+DEFAULT_BING_THREAD = 16                   # Số luồng Bing OCR (tăng lên 32 - 48 nếu cần nhanh hơn)
 DEFAULT_LANG = "vi"                        # "vi", "en", "ja", "zh"
 DEFAULT_FORMAT = "ass"                     # "ass", "srt", "both"
 DEFAULT_LINE_BREAK_MODE = "y_cluster"      # "y_cluster", "line", "paragraph"
@@ -153,14 +153,14 @@ def create_arg_parser() -> argparse.ArgumentParser:
     # Google Lens settings
     ocr_group.add_argument(
         "--gglens_thread",
-        type=int,
+        type=positive_int,
         default=DEFAULT_GGLENS_THREAD,
-        help=f"Google Lens OCR threads (e.g. 32-80 threads for 20-30 img/s). Default: {DEFAULT_GGLENS_THREAD}",
+        help=f"Google Lens OCR threads (more threads = faster, but more likely to be rate limited). Default: {DEFAULT_GGLENS_THREAD}",
     )
     # Bing OCR settings
     ocr_group.add_argument(
         "--bing_thread",
-        type=int,
+        type=positive_int,
         default=DEFAULT_BING_THREAD,
         help=f"Bing OCR threads. Default: {DEFAULT_BING_THREAD}",
     )
@@ -381,13 +381,15 @@ def process_sup(
     if sup_type == "dvd":
         target_images_dir = save_dir / "DvdSup_Images"
         print(f"Detected DVD-SUP format in '{sup_path}'")
-        subtitles = DvdSupParser(sup_path, ifo_path=ifo_path).parse(forced_only=forced_only)
+        subtitles = filter_by_time(
+            DvdSupParser(sup_path, ifo_path=ifo_path).parse(forced_only=forced_only), start_ms, end_ms
+        )
     else:
         target_images_dir = save_dir / "PGS_Images"
         print(f"Parsing Blu-ray PGS file '{sup_path}' ...")
+        # The PGS parser applies the time range itself, before decoding the bitmaps
         subtitles = PgsParser(sup_path).parse(forced_only=forced_only, range_start_ms=start_ms, range_end_ms=end_ms)
 
-    subtitles = filter_by_time(subtitles, start_ms, end_ms)
     if not subtitles:
         print(f"No subtitle pictures found in {sup_path}")
         return
@@ -405,6 +407,7 @@ def process_sup(
         lang=lang,
         font=font,
         use_cache=use_cache,
+        fuzzy_merge=False,  # every picture is its own authored line
     )
     ocr()
 
@@ -453,6 +456,7 @@ def process_vobsub(
         lang=lang,
         font=font,
         use_cache=use_cache,
+        fuzzy_merge=False,  # every picture is its own authored line
     )
     ocr()
 
@@ -601,6 +605,9 @@ def main():
     video_path = args.video_dir
     if video_path is None:
         parser.error("--video_dir, --sup, --vobsub, or --img_dir is required")
+
+    if not Path(video_path).exists():
+        parser.error(f"input '{video_path}' does not exist")
 
     video_formats = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".flv", ".mpg", ".mpeg"}
     vsf_args = vars(args).copy()
