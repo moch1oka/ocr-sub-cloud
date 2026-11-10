@@ -266,7 +266,27 @@ class BingParsingTest(unittest.TestCase):
     def test_answer_without_ocr_is_empty_and_noted(self):
         engine = BingOCR()
         self.assertEqual(engine.parse_knowledge_response({"tags": [{"displayName": "", "actions": []}]}, 100, 100), "")
-        self.assertEqual(sum(engine._soft_failures.values()), 1)
+        self.assertEqual(dict(engine._soft_failures), {"answer had no text recognition (tags: (unnamed))": 1})
+
+    def _process_with_answers(self, answers):
+        """Runs process_image against a fake Bing: one upload redirect, then the given knowledge answers."""
+        upload = mock.Mock(headers={"Location": "/images/search?view=detailV2&insightsToken=bcid_test"})
+        responses = [upload] + [mock.Mock(**{"json.return_value": a}) for a in answers]
+        engine = BingOCR()
+        engine.OCR_NOT_READY_DELAYS = (0, 0)
+        with mock.patch("bing.get_image_raw_bytes_and_dims", return_value=(b"img", 462, 164)), \
+                mock.patch.object(engine, "post_with_retry", side_effect=responses) as post:
+            return engine.process_image("x.png"), post.call_count
+
+    def test_asks_again_when_ocr_is_not_ready_yet(self):
+        ready = json.loads((Path(__file__).parent / "fixtures" / "bing_knowledge.json").read_text(encoding="utf-8"))
+        not_ready = {"tags": [{"displayName": "", "actions": []}]}
+        self.assertEqual(self._process_with_answers([not_ready, ready]), ("Không lẽ em đi lạc hả?", 3))
+        self.assertEqual(self._process_with_answers([ready]), ("Không lẽ em đi lạc hả?", 2))
+
+    def test_gives_up_after_the_retries(self):
+        not_ready = {"tags": []}
+        self.assertEqual(self._process_with_answers([not_ready] * 3), ("", 4))
 
 
 class FailureSummaryTest(unittest.TestCase):

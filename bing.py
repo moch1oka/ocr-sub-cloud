@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 from urllib.parse import urlparse
 
 from curl_cffi import CurlMime
@@ -9,6 +10,9 @@ from utils import get_image_raw_bytes_and_dims
 
 
 class BingOCR(OCREngine):
+    # Waits (seconds) before asking again when the answer has no OCR part yet
+    OCR_NOT_READY_DELAYS: tuple[float, ...] = (0.6, 1.5)
+
     def __init__(
         self,
         threads: int = 16,
@@ -82,35 +86,49 @@ class BingOCR(OCREngine):
             "knowledgeRequest": {"invokedSkills": ["OCR"], "index": 1},
         }
 
-        mp2 = CurlMime()
-        try:
-            mp2.addpart(
-                name="knowledgeRequest",
-                content_type="application/json",
-                data=json.dumps(req_data),
-            )
+        # The OCR result is produced after the upload; asked too early (fast connections do this),
+        # the answer comes back without it, so ask again after a short wait
+        data: dict = {}
+        for attempt in range(len(self.OCR_NOT_READY_DELAYS) + 1):
+            if attempt:
+                time.sleep(self.OCR_NOT_READY_DELAYS[attempt - 1])
 
-            r2 = self.post_with_retry(
-                api_url,
-                multipart=mp2,
-                headers=headers,
-                timeout=20,
-                error_context=f"knowledge API {img_path}",
-            )
-        finally:
-            mp2.close()
+            mp2 = CurlMime()
+            try:
+                mp2.addpart(
+                    name="knowledgeRequest",
+                    content_type="application/json",
+                    data=json.dumps(req_data),
+                )
 
-        if not r2:
-            self.note_failure("OCR request failed")
-            return ""
+                r2 = self.post_with_retry(
+                    api_url,
+                    multipart=mp2,
+                    headers=headers,
+                    timeout=20,
+                    error_context=f"knowledge API {img_path}",
+                )
+            finally:
+                mp2.close()
 
-        try:
-            data = r2.json()
-        except Exception:
-            self.note_failure("OCR answer was not JSON")
-            return ""
+            if not r2:
+                self.note_failure("OCR request failed")
+                return ""
+
+            try:
+                data = r2.json()
+            except Exception:
+                self.note_failure("OCR answer was not JSON")
+                return ""
+
+            if self.find_ocr_tag(data) is not None:
+                break
 
         return self.parse_knowledge_response(data, width, height, self.decode_grayscale(raw_bytes))
+
+    @staticmethod
+    def find_ocr_tag(data: dict) -> dict | None:
+        return next((t for t in data.get("tags", []) if t.get("displayName") == "##TextRecognition"), None)
 
     @staticmethod
     def extract_insights_token(location: str) -> str:
@@ -123,10 +141,13 @@ class BingOCR(OCREngine):
 
     def parse_knowledge_response(self, data: dict, width: int, height: int, img_gray=None) -> str:
         """Step 3: turns Bing's knowledge JSON into text, using the line boxes for layout and italics."""
-        ocr_tag = next((t for t in data.get("tags", []) if t.get("displayName") == "##TextRecognition"), None)
+        ocr_tag = self.find_ocr_tag(data)
         if ocr_tag is None:
-            # Also what an image without any text gives; only suspicious when every image does it
-            self.note_failure("answer had no text recognition", soft=True)
+            # Also what an image without any text gives; only suspicious when every image does it.
+            # What the answer did contain goes into the message, to tell a refusal from an API change.
+            tag_names = sorted({t.get("displayName") or "(unnamed)" for t in data.get("tags", [])})
+            contents = f"tags: {', '.join(tag_names)}" if tag_names else f"keys: {', '.join(sorted(data)) or 'none'}"
+            self.note_failure(f"answer had no text recognition ({contents})", soft=True)
             return ""
 
         regions = []
