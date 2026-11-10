@@ -239,7 +239,7 @@ class OcrRunTest(unittest.TestCase):
 
 
 class BingParsingTest(unittest.TestCase):
-    """Bing's answers are parsed offline here, because the live service often refuses CI servers."""
+    """Bing's answers are parsed offline here, because the live service sometimes returns nothing on CI."""
 
     def test_token_from_upload_redirect(self):
         get = BingOCR.extract_insights_token
@@ -273,20 +273,17 @@ class BingParsingTest(unittest.TestCase):
         upload = mock.Mock(headers={"Location": "/images/search?view=detailV2&insightsToken=bcid_test"})
         responses = [upload] + [mock.Mock(**{"json.return_value": a}) for a in answers]
         engine = BingOCR()
-        engine.OCR_NOT_READY_DELAYS = (0, 0)
         with mock.patch("bing.get_image_raw_bytes_and_dims", return_value=(b"img", 462, 164)), \
                 mock.patch.object(engine, "post_with_retry", side_effect=responses) as post:
             return engine.process_image("x.png"), post.call_count
 
-    def test_asks_again_when_ocr_is_not_ready_yet(self):
-        ready = json.loads((Path(__file__).parent / "fixtures" / "bing_knowledge.json").read_text(encoding="utf-8"))
-        not_ready = {"tags": [{"displayName": "", "actions": []}]}
-        self.assertEqual(self._process_with_answers([not_ready, ready]), ("Không lẽ em đi lạc hả?", 3))
-        self.assertEqual(self._process_with_answers([ready]), ("Không lẽ em đi lạc hả?", 2))
+    def test_upload_then_one_knowledge_request(self):
+        answer = json.loads((Path(__file__).parent / "fixtures" / "bing_knowledge.json").read_text(encoding="utf-8"))
+        self.assertEqual(self._process_with_answers([answer]), ("Không lẽ em đi lạc hả?", 2))
 
-    def test_gives_up_after_the_retries(self):
-        not_ready = {"tags": []}
-        self.assertEqual(self._process_with_answers([not_ready] * 3), ("", 4))
+    def test_answer_seen_on_ci_servers_gives_no_text(self):
+        # Some CI runs get this for every image: valid JSON, one unnamed tag, no OCR
+        self.assertEqual(self._process_with_answers([{"tags": [{"displayName": "", "actions": []}]}]), ("", 2))
 
 
 class FailureSummaryTest(unittest.TestCase):
@@ -308,7 +305,7 @@ class FailureSummaryTest(unittest.TestCase):
 
         output = self._run(Blocked)
         self.assertIn("3 of 3 images failed: upload gave no image token", output)
-        self.assertIn("Try the other --ocr_engine", output)
+        self.assertIn("try the other --ocr_engine", output)
 
     def test_a_few_images_without_text_are_not_a_failure(self):
         class OneEmpty(_FakeEngine):

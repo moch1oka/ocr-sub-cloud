@@ -225,8 +225,9 @@ class OCREngine(ABC):
         self.console.print(f"[yellow]{self.engine_name}: {sum(failures.values())} of {images_sent} images failed: {details}[/yellow]")
         if sum(failures.values()) == images_sent:
             self.console.print(
-                f"[yellow]Every image failed, so {self.engine_name} is probably refusing requests from this "
-                "network (common on servers / VPNs) or its API changed. Try the other --ocr_engine.[/yellow]"
+                f"[yellow]Every image failed. {self.engine_name} sometimes does this for a whole run "
+                "(it seems to depend on the network the requests come from). "
+                "Try again later, or try the other --ocr_engine.[/yellow]"
             )
 
     def get_session(self) -> requests.Session:

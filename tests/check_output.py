@@ -2,8 +2,9 @@
 Checks subtitles produced from the sample images in test/ (used by CI after a live OCR run).
 Usage: python tests/check_output.py [--allow-refused] <file.ass|file.srt> [...]
 
---allow-refused: a file with no entries at all passes with a warning. Use it for a service that is
-known to turn away CI servers (Bing); a run that returns text must still be complete and correct.
+--allow-refused: a file with no entries at all passes with a warning. Use it for a service that
+sometimes answers a whole run without text (Bing); a run that returns text must still be complete
+and correct.
 """
 
 import sys
@@ -28,7 +29,7 @@ def check(path: Path, allow_refused: bool = False) -> tuple[list[str], list[str]
     count = count_entries(path, text)
 
     if count == 0 and allow_refused:
-        return [], [f"{path}: the OCR service returned nothing for any image (refused this network?), not checked"]
+        return [], [f"{path}: the OCR service returned nothing for any image (it does this on some runners), not checked"]
 
     errors = []
     if count != EXPECTED_ENTRIES:

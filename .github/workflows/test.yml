@@ -66,7 +66,8 @@ jobs:
       - name: Run OCR test (Bing OCR)
         run: python run.py --img_dir test --ocr_engine bing -o outputs_bing
 
-      # Bing often turns away requests from CI servers. Its answer parsing is covered by the offline
+      # On some runners Bing answers every image without text (other cells of the same run are fine,
+      # so it is not something the code controls). Its answer parsing is covered by the offline
       # tests, so here "no result at all" is only a warning; a wrong or partial result still fails.
       - name: Check Bing output
         run: python tests/check_output.py --allow-refused outputs_bing/output_subtitles.ass

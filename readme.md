@@ -79,6 +79,7 @@ Files whose names don't follow this pattern are skipped.
 - **Top/bottom:** subtitles in the upper 35% of the screen get the `Top` style in ASS and `{\an8}` in SRT. In PGS, a top sign and a bottom line shown at the same time become two separate entries.
 - **Italics (`--detect_italic`)** are guessed locally from the slant of each text line, since neither OCR service reports font style. Off by default; check the results.
 - **Line breaks (`--line_break_mode`):** `y_cluster` (default) groups the recognized lines into rows by their vertical position; `line` keeps every line the OCR service returns; `paragraph` joins each paragraph into one line.
+- **Bing can come back empty:** now and then Bing accepts every image of a run but answers without any text. This was seen on some of GitHub's CI machines while others, running the same code at the same time, got full results, so it seems to depend on where the requests come from. The tool says so when every image comes back empty; run it again later or use `--ocr_engine gglens`.
 - **Braces:** `{` and `}` start override tags in ASS, so any the OCR reads are written as `｛` `｝` in the `.ass` file (the `.srt` keeps them as they are).
 - **Timing:** SRT keeps the exact milliseconds. ASS only has centiseconds, so times are rounded the way Aegisub does it.
 - **DVD:** without an `.ifo`, DVD-SUP uses a generic palette, so colors may be off. Usually it doesn't matter for OCR. Subtitles with no end time get one from the next subtitle's start, capped at 5 s.
